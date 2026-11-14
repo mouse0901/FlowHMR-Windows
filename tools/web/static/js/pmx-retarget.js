@@ -1222,8 +1222,82 @@ export function createPmxRetarget(mesh, rest, motion, { poseOffsets = null } = {
     }
   }
 
-  function apply(frame) {
+  // ---- frame blending -----------------------------------------------------
+  // pose() only ever evaluates whole frames: the foot planting, contact runs and
+  // root lift all index integer samples. Rather than thread a time value through
+  // that maths, a fractional frame evaluates both neighbours and blends the
+  // resulting bone transforms. Playback moves one frame at a time, so the frame
+  // that was "next" is "current" on the following call — caching both poses means
+  // a steady 60 Hz preview costs one evaluation per paint, exactly as before.
+  const boneCount = bones.length;
+  // Snapshot what writeSkeleton() actually consumes — the per-bone local
+  // transform — plus the root world position the mesh offset is derived from.
+  // Blending worldRotation instead would be computed and then thrown away.
+  const makeSlot = () => ({
+    rot: new Float32Array(boneCount * 4),
+    pos: new Float32Array(boneCount * 3),
+    root: new Float32Array(3),
+    frame: -1,
+  });
+  const poseA = makeSlot(), poseB = makeSlot();
+  const blendQ = new Quaternion(), blendQ2 = new Quaternion();
+  const rootBone = map[0];
+
+  function capturePose(slot, frame) {
+    if (slot.frame === frame) return true;
     if (!evaluate(frame)) return false;
+    for (let i = 0; i < boneCount; i++) {
+      localRotation[i].toArray(slot.rot, i * 4);
+      localPosition[i].toArray(slot.pos, i * 3);
+    }
+    if (rootBone >= 0) worldPosition[rootBone].toArray(slot.root);
+    slot.frame = frame;
+    return true;
+  }
+
+  function restorePose(slot) {
+    for (let i = 0; i < boneCount; i++) {
+      localRotation[i].fromArray(slot.rot, i * 4);
+      localPosition[i].fromArray(slot.pos, i * 3);
+    }
+    if (rootBone >= 0) worldPosition[rootBone].fromArray(slot.root);
+  }
+
+  function blendPose(a, b, t) {
+    for (let i = 0; i < boneCount; i++) {
+      blendQ2.fromArray(b.rot, i * 4);
+      blendQ.fromArray(a.rot, i * 4).slerp(blendQ2, t);
+      localRotation[i].copy(blendQ);
+      localPosition[i].set(
+        a.pos[i * 3] + (b.pos[i * 3] - a.pos[i * 3]) * t,
+        a.pos[i * 3 + 1] + (b.pos[i * 3 + 1] - a.pos[i * 3 + 1]) * t,
+        a.pos[i * 3 + 2] + (b.pos[i * 3 + 2] - a.pos[i * 3 + 2]) * t,
+      );
+    }
+    if (rootBone >= 0) {
+      worldPosition[rootBone].set(
+        a.root[0] + (b.root[0] - a.root[0]) * t,
+        a.root[1] + (b.root[1] - a.root[1]) * t,
+        a.root[2] + (b.root[2] - a.root[2]) * t,
+      );
+    }
+  }
+
+  function apply(frame) {
+    if (!Number.isFinite(frame)) return false;
+    const clamped = Math.max(0, Math.min(frames - 1, frame));
+    const base = Math.floor(clamped);
+    const next = Math.min(frames - 1, base + 1);
+    const t = clamped - base;
+    if (!capturePose(poseA, base)) return false;
+    if (next === base || t < 1e-4) {
+      restorePose(poseA);
+      // The world state now holds frame `base`; a half-blended pose would be
+      // stale, so both slots keep their sample but the next blend re-reads them.
+    } else {
+      if (!capturePose(poseB, next)) return false;
+      blendPose(poseA, poseB, t);
+    }
     writeSkeleton();
     if (ikMode) solveNativeSkeleton();
     return true;

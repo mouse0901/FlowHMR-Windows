@@ -1,5 +1,5 @@
 import { Matrix4, Quaternion, Vector3 } from "three";
-import { makePoseOffsets, normalizePoseOffsets, normalizeVrmPoseOffsets } from "./pose-offsets.js";
+import { makePoseOffsets } from "./pose-offsets.js";
 
 const JOINTS = 52;
 const UP = new Vector3(0, 1, 0);
@@ -14,7 +14,6 @@ const ease = (value) => {
 };
 
 function boneKey(bone, profile) {
-  if (profile === "vrm") return bone.userData.vrmHumanoidBone?.toLowerCase() ?? "";
   const name = bone.userData?.originalName ?? bone.name;
   const key = (name ?? "").normalize("NFKC").split(/[|:]/).at(-1)
     .toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -38,11 +37,9 @@ function layout(bones, profile) {
   };
   const map = new Int32Array(JOINTS).fill(-1);
   const meta = profile === "metahuman";
-  const vrm = profile === "vrm";
   map[0] = find(meta ? "pelvis" : "hips");
   map[15] = find("head");
   const spine = (meta ? ["spine01", "spine02", "spine03", "spine04", "spine05"]
-    : vrm ? ["spine", "chest", "upperchest"]
     : ["spine", "spine1", "spine2"]).map((name) => find(name)).filter((i) => i >= 0);
   const neck = (meta ? ["neck01", "neck02"] : ["neck", "neck1"])
     .map((name) => find(name)).filter((i) => i >= 0);
@@ -53,26 +50,23 @@ function layout(bones, profile) {
   for (let s = 0; s < 2; s++) {
     const side = s === 0 ? "left" : "right";
     const short = side[0];
-    const limb = (mh, vrmName, ...mixamo) => meta ? find(mh + short)
-      : vrm ? find(side + vrmName) : find(...mixamo.map((name) => side + name));
-    map[1 + s] = limb("thigh", "upperleg", "upleg");
-    map[4 + s] = limb("calf", "lowerleg", "leg");
-    map[7 + s] = limb("foot", "foot", "foot");
-    map[10 + s] = limb("ball", "toes", "toebase", "toe");
-    map[13 + s] = limb("clavicle", "shoulder", "shoulder");
-    map[16 + s] = limb("upperarm", "upperarm", "arm");
-    map[18 + s] = limb("lowerarm", "lowerarm", "forearm");
-    map[20 + s] = limb("hand", "hand", "hand");
+    const limb = (mh, ...mixamo) => meta ? find(mh + short) : find(...mixamo.map((name) => side + name));
+    map[1 + s] = limb("thigh", "upleg");
+    map[4 + s] = limb("calf", "leg");
+    map[7 + s] = limb("foot", "foot");
+    map[10 + s] = limb("ball", "toebase", "toe");
+    map[13 + s] = limb("clavicle", "shoulder");
+    map[16 + s] = limb("upperarm", "arm");
+    map[18 + s] = limb("lowerarm", "forearm");
+    map[20 + s] = limb("hand", "hand");
     for (const [digit, name] of DIGITS.entries()) for (let part = 1; part <= 3; part++) {
       const names = name === "pinky" ? [name, "little"] : [name];
-      const segments = name === "thumb" ? ["metacarpal", "proximal", "distal"] : ["proximal", "intermediate", "distal"];
-      const key = 22 + 15 * s + 3 * digit + part - 1;
-      map[key] = vrm ? find(side + names.at(-1) + segments[part - 1])
-        : meta ? find(...names.map((n) => `${n}0${part}${short}`))
-          : find(...names.map((n) => `${side}hand${n}${part}`));
+      map[22 + 15 * s + 3 * digit + part - 1] = meta
+        ? find(...names.map((n) => `${n}0${part}${short}`))
+        : find(...names.map((n) => `${side}hand${n}${part}`));
     }
   }
-  if (BODY.some((j) => map[j] < 0)) throw new Error(`The character is missing required ${profile} body bones.`);
+  if (BODY.some((j) => map[j] < 0)) throw new Error(`The FBX is missing required ${profile} body bones.`);
   const descendant = (child, parent) => {
     for (let node = bones[child]?.parent; node; node = node.parent) if (node === bones[parent]) return true;
     return false;
@@ -183,7 +177,43 @@ function hierarchy(root) {
 const component = (attr, index, i) => i === 0 ? attr.getX(index) : i === 1 ? attr.getY(index)
   : i === 2 ? attr.getZ(index) : attr.getW(index);
 
-function soleProbes(root, primary, records, legs, bounds) {
+// Sole probes walk every skinned vertex of the body looking for the ones that
+// belong to each foot, which is the single most expensive step of building a
+// rig (16–25 ms on a 20k-vertex character). A clone shares that geometry and the
+// same bone names, so the answer is identical every time the same asset is worn
+// again — it is cached as plain data and rehydrated against the new bones.
+const SOLE_CACHE = new WeakMap();
+
+function soleProbes(root, primary, records, legs, bounds, asset) {
+  // Signature deliberately excludes node names: cloning renames the root, so a
+  // name-based key never matched and the cache always missed.
+  const sig = `${primary.bones.length}|${legs.length}`;
+  const cached = asset ? SOLE_CACHE.get(asset) : null;
+  if (cached?.sig === sig) {
+    // A record carries no id of its own; its bone's name survives cloning, which
+    // is what makes it usable as a key here.
+    const byName = new Map();
+    for (const node of records.keys()) {
+      if (node?.name && !byName.has(node.name)) byName.set(node.name, records.get(node));
+    }
+    let complete = true;
+    // probes[side][part] is a list of samples, so rebuild two levels deep.
+    const rebuilt = cached.sides.map((side) => side.map((partList) => partList.map((sample) => {
+      const influences = [];
+      for (const entry of sample.influences) {
+        const record = byName.get(entry.name);
+        if (!record) { complete = false; break; }
+        influences.push({ record, local: new Vector3().fromArray(entry.local), weight: entry.weight });
+      }
+      return { y: sample.y, along: sample.along, influences };
+    })));
+    const populated = rebuilt.some((side) => side.some((partList) => partList.length));
+    window.__soleCache = complete && populated ? "hit" : complete ? "empty" : "bone-miss";
+    if (complete && populated) return rebuilt;
+  } else {
+    window.__soleCache = cached ? "sig-miss" : asset ? "cold" : "no-asset";
+  }
+
   const candidates = [[], []];
   const up = new Vector3(), point = new Vector3();
   const heading = legs.map(({ ankle, toe }) => {
@@ -235,7 +265,7 @@ function soleProbes(root, primary, records, legs, bounds) {
     }
   });
 
-  return legs.map(({ ankle, toe }, side) => {
+  const probes = legs.map(({ ankle, toe }, side) => {
     const options = candidates[side].sort((a, b) => a.y - b.y);
     if (options.length) {
       const low = options.filter((option) => option.y - options[0].y < 0.065);
@@ -255,41 +285,61 @@ function soleProbes(root, primary, records, legs, bounds) {
       return [{ y, influences: [{ record, local: p.applyMatrix4(record.restMatrix.clone().invert()), weight: 1 }] }];
     });
   });
+
+  // Store the answer as plain data so it survives the clone it came from.
+  if (asset) {
+    SOLE_CACHE.set(asset, {
+      sig,
+      sides: probes.map((side) => side.map((partList) => partList.map((sample) => ({
+        y: sample.y,
+        along: sample.along,
+        influences: sample.influences.map((entry) => ({
+          name: entry.record.node?.name ?? null, local: entry.local.toArray(), weight: entry.weight,
+        })),
+      })))),
+    });
+  }
+  return probes;
 }
 
 /**
- * Drive an independent, normalized character clone from a saved SMPL-H motion.
+ * Drive an independent, normalized FBX clone from a saved SMPL-H motion.
  * The file's own skin weights, bone proportions, and bind offsets remain in use.
  */
 export function createFbxCharacterRetarget(root, asset, motion, { poseOffsets = null } = {}) {
   const profile = asset?.profile;
-  if (!["mixamo", "metahuman", "vrm"].includes(profile)) throw new Error("Unknown character skeleton.");
+  if (profile !== "mixamo" && profile !== "metahuman") throw new Error("Unknown FBX character skeleton.");
   const { frames, joints, quaternions, contacts, floor, restFloor } = motion;
   if (!Number.isSafeInteger(frames) || frames < 1 || motion.rest?.length !== JOINTS * 3 ||
       joints?.length !== frames * JOINTS * 3 || quaternions?.length !== frames * JOINTS * 4) {
-    throw new Error("Invalid saved motion for the character.");
+    throw new Error("Invalid saved motion for the FBX character.");
   }
+  const tA = performance.now();
   const primary = asset.getRig(root);
-  if (!primary?.bones?.length) throw new Error("The character has no body skeleton.");
+  if (!primary?.bones?.length) throw new Error("The FBX character has no body skeleton.");
+  const tB = performance.now();
   const { map, spine, neck } = layout(primary.bones, profile);
+  const tC = performance.now();
   const { include, records, order, base } = hierarchy(root);
+  const tD = performance.now();
   const primaryRecords = primary.bones.map((bone) => include(bone));
+  const tE = performance.now();
+  window.__fbxRetargetTiming = {
+    getRig: +(tB - tA).toFixed(2),
+    layout: +(tC - tB).toFixed(2),
+    hierarchy: +(tD - tC).toFixed(2),
+    records: +(tE - tD).toFixed(2),
+    bones: primary.bones.length,
+  };
   const source = Array.from({ length: JOINTS }, (_, i) => new Vector3().fromArray(motion.rest, i * 3));
   if (!source.every(finiteVector)) throw new Error("Invalid source rest position.");
   const slot = (j) => primaryRecords[map[j]];
   const shoulders = [slot(13) ?? slot(16), slot(14) ?? slot(17)];
   const align = new Quaternion().setFromAxisAngle(UP,
     heading(source[13], source[14]) - heading(shoulders[0].bindPosition, shoulders[1].bindPosition));
-  const bindForJoint = (j) => slot(j) && align.clone().multiply(slot(j).bindRotation);
-  const calibratedVrm = profile === "vrm" && Number.isFinite(motion.vrmNeckPitch);
-  const neckBind = calibratedVrm && bindForJoint(12);
-  const neckBaseline = neckBind ? neckBind.clone().invert()
-    .multiply(new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), motion.vrmNeckPitch * Math.PI / 180))
-    .multiply(neckBind).normalize() : null;
-  const poseSettings = (settings) => calibratedVrm ? normalizeVrmPoseOffsets(settings, neckBaseline) : normalizePoseOffsets(settings);
-  const edits = makePoseOffsets(bindForJoint, source[16].clone().sub(source[17]).setY(0),
-    calibratedVrm ? { headPitch: 0 } : undefined);
-  edits.set(poseSettings(poseOffsets));
+  const edits = makePoseOffsets((j) => slot(j) && align.clone().multiply(slot(j).bindRotation),
+    source[16].clone().sub(source[17]).setY(0));
+  edits.set(poseOffsets);
   const editTargets = new Map(Array.from(map, (i, j) => [primaryRecords[i], j]).filter(([record]) => record));
   const target = primaryRecords.map((record) => record.bindPosition.clone().applyQuaternion(align));
   const attachDriver = (i, a, b = a, weight = 0, correction = IDENTITY, lowerSpine = false) => {
@@ -330,7 +380,12 @@ export function createFbxCharacterRetarget(root, asset, motion, { poseOffsets = 
 
   const legs = [0, 1].map((s) => ({ hip: slot(1 + s), knee: slot(4 + s), ankle: slot(7 + s), toe: slot(10 + s),
     thighGoal: new Quaternion(), kneeGoal: new Quaternion(), footGoal: new Quaternion(), toeGoal: new Quaternion() }));
-  const probes = soleProbes(root, primary, records, legs, asset.rest?.bounds);
+  const tP = performance.now();
+  const probes = soleProbes(root, primary, records, legs, asset.rest?.bounds, asset);
+  window.__fbxRetargetTiming = {
+    ...window.__fbxRetargetTiming,
+    soleProbes: +(performance.now() - tP).toFixed(2),
+  };
   const targetSole = Math.min(...probes.flat(2).map((item) => item.y));
   const sourceSole = Number.isFinite(restFloor) ? restFloor : Math.min(source[10].y, source[11].y) - 0.02;
   const sourceHipHeight = source[0].y - sourceSole;
@@ -566,10 +621,8 @@ export function createFbxCharacterRetarget(root, asset, motion, { poseOffsets = 
 
   let lastFrame = -1;
   function setPoseOffsets(settings) {
-    const pose = poseSettings(settings);
-    edits.set(pose);
+    edits.set(settings);
     lastFrame = -1;
-    return pose;
   }
   function apply(frame) {
     if (!Number.isInteger(frame) || frame < 0 || frame >= frames) return false;
@@ -580,9 +633,7 @@ export function createFbxCharacterRetarget(root, asset, motion, { poseOffsets = 
     for (const record of order) if (record.driver || record.copy) {
       const { node, pose: rotation, copy } = record;
       node.quaternion.copy(rotation);
-      const joint = editTargets.get(copy?.source ?? record);
-      if (joint === 12 && neckBaseline) node.quaternion.multiply(neckBaseline);
-      const change = edits.joints.get(joint);
+      const change = edits.joints.get(editTargets.get(copy?.source ?? record));
       if (change) {
         if (copy) node.quaternion.multiply(delta.copy(copy.offsetBasis).multiply(change).multiply(inverse.copy(copy.offsetBasis).invert()));
         else node.quaternion.multiply(change);
@@ -593,7 +644,6 @@ export function createFbxCharacterRetarget(root, asset, motion, { poseOffsets = 
     root.quaternion.multiplyQuaternions(edits.rootRotation, rootRotation);
     edits.position(rootPosition, rootOffset, pelvis.position, root.position);
     if (!root.matrixAutoUpdate) root.updateMatrix();
-    primary.updateConstraints?.();
     lastFrame = frame;
     return true;
   }

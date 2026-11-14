@@ -1,9 +1,10 @@
-import { $, el, show } from "./utils.js";
+import { $, el, formatBytes, show } from "./utils.js";
 import { appError, message as m, setText, t } from "./i18n.js";
 import * as api from "./api.js";
-import { readStoredPose, storedPose } from "./pose-offsets.js";
+import { renderCharacterThumbnail, thumbnailLook } from "./character-thumbnail.js";
+import { normalizePoseOffsets, readStoredPose, storedPose } from "./pose-offsets.js";
 
-const kindOf = (name) => /\.(pmx|fbx|vrm)$/i.exec(name)?.[1]?.toLowerCase();
+const kindOf = (name) => /\.(pmx|fbx)$/i.exec(name)?.[1]?.toLowerCase();
 const emptyLibrary = () => ({ models: [], actors: {}, defaults: {}, presets: {} });
 const slot = (actor) => String(actor.number ?? "single");
 const editKey = (actor, id) => `flowhmr-character-edit:${actor.id}:${id}`;
@@ -17,12 +18,19 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
   const apply = $("pmxApply"), restore = $("pmxRestore"), error = $("pmxError");
   const remove = $("characterDelete"), confirm = $("characterDeleteConfirmButton");
   const cancelRemoval = $("characterDeleteCancel"), cancelDialog = $("characterDialogCancel");
+  const grid = $("characterGrid"), searchInput = $("characterSearch"), kindFilter = $("characterFilter");
+  const detailImage = $("characterPreviewImage"), detailBadge = $("characterPreviewBadge");
+  const detailName = $("characterDetailName"), detailFile = $("characterDetailFile");
+  const detailInfo = $("characterDetailInfo"), detailWarning = $("characterDetailWarning");
+  const emptyNote = $("characterEmpty");
   const picker = () => window.pywebview?.api?.choose_character_file;
+  const pickerFolder = () => window.pywebview?.api?.choose_character_folder;
+  const batchButton = $("characterBatch");
   let files = [], candidates = [], catalog = emptyLibrary(), catalogReady = false, catalogRead = null;
   let focused = null, operation = null, restoring = null, picking = false, pickVersion = 0, removing = null;
+  let pendingApply = null;   // library id to auto-apply once the batch finishes
+  let searchText = "", filterKind = "all";
   const refs = new Map(), writes = new Map();
-  let remoteRead = null;
-  let remotePending = false;
 
   function currentActor() {
     const actors = getActors();
@@ -53,7 +61,10 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
     show(button, !!actor);
     show(model, candidates.length > 1);
     show(browse, !picker());
-    if (remotePending && !remoteRead && !busy && !writes.size) queueMicrotask(syncRemoteCharacters);
+    // The batch button only exists on the desktop build, which owns the folder
+    // picker and the ticket endpoint behind it.
+    show(batchButton, !!pickerFolder());
+    if (batchButton) batchButton.disabled = busy;
   }
   function status() {
     const actor = currentActor(), candidate = candidates[Number(model.value)];
@@ -77,15 +88,102 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
     actorSelect.value = currentActor()?.id ?? "";
     show("characterActorRow", actors.length > 1);
   }
-  function renderLibrary(id = currentActor()?.character?.libraryId ?? "") {
-    const blank = el("option", "", m(catalog.models.length ? "character.library_choose" : "character.library_empty"));
+  const thumbnailUrl = (item) => (item.hasThumb ? `/api/character-library/${item.id}/thumbnail` : "");
+  function visibleModels() {
+    return catalog.models.filter((item) => {
+      if (filterKind !== "all" && item.kind !== filterKind) return false;
+      if (!searchText) return true;
+      return `${item.name} ${item.filename}`.toLowerCase().includes(searchText);
+    });
+  }
+  function cardFor(item) {
+    const card = el("button", "character-card");
+    card.type = "button";
+    card.dataset.id = item.id;
+    card.setAttribute("role", "option");
+    const active = librarySelect.value === item.id;
+    card.setAttribute("aria-selected", String(active));
+    card.classList.toggle("selected", active);
+
+    const figure = el("span", "character-card-figure");
+    if (item.hasThumb) {
+      const image = el("img");
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.alt = "";
+      image.draggable = false;
+      image.src = thumbnailUrl(item);
+      image.addEventListener("error", () => {
+        image.remove();
+        figure.classList.add("placeholder");
+      }, { once: true });
+      figure.append(image);
+    } else {
+      figure.classList.add("placeholder");
+    }
+    figure.append(el("span", "character-card-badge", item.kind.toUpperCase()));
+
+    const label = el("span", "character-card-name", item.name);
+    label.title = `${item.name}\n${item.filename}`;
+    card.append(figure, label);
+    card.addEventListener("click", () => {
+      if (librarySelect.value !== item.id) {
+        librarySelect.value = item.id;
+        librarySelect.dispatchEvent(new Event("change"));
+      }
+      for (const other of grid.querySelectorAll(".character-card")) {
+        const on = other === card;
+        other.classList.toggle("selected", on);
+        other.setAttribute("aria-selected", String(on));
+      }
+      updateDetail();
+    });
+    return card;
+  }
+  function updateDetail() {
+    const item = libraryChoice();
+    if (!item) {
+      detailImage.removeAttribute("src");
+      show(detailImage, false);
+      show(detailBadge, false);
+      setText(detailName, m("character.preview_empty"));
+      setText(detailFile, "");
+      setText(detailInfo, "");
+      show(detailWarning, false);
+      return;
+    }
+    if (item.hasThumb) {
+      show(detailImage, true);
+      detailImage.src = thumbnailUrl(item);
+      show(detailBadge, false);
+    } else {
+      show(detailImage, false);
+      show(detailBadge, true);
+      setText(detailBadge, item.kind.toUpperCase());
+    }
+    setText(detailName, item.name);
+    setText(detailFile, item.filename);
+    setText(detailInfo, [item.kind.toUpperCase(), item.bytes ? formatBytes(item.bytes) : ""].filter(Boolean).join(" · "));
+    show(detailWarning, !item.hasThumb);
+  }
+  function renderLibrary(id) {
+    const fallback = currentActor()?.character?.libraryId ?? "";
+    const target = id === undefined ? (librarySelect.value || fallback) : id;
+    // The hidden <select> stays the single source of truth for the selection;
+    // a select with no matching <option> silently resets value to "", so the
+    // catalogue is mirrored into it on every render.
+    const blank = el("option", "", "");
     blank.value = "";
-    librarySelect.replaceChildren(blank, ...catalog.models.map(({ id, name, filename }) => {
-      const option = el("option", "", `${name} · ${filename}`);
-      option.value = id;
+    librarySelect.replaceChildren(blank, ...catalog.models.map((item) => {
+      const option = el("option", "", item.name);
+      option.value = item.id;
       return option;
     }));
-    if (catalog.models.some((item) => item.id === id)) librarySelect.value = id;
+    librarySelect.value = catalog.models.some((item) => item.id === target) ? target : "";
+    const items = visibleModels();
+    grid.replaceChildren(...items.map(cardFor));
+    show(emptyNote, items.length === 0);
+    updateDetail();
     setText($("pmxStatus"), status());
   }
   function resetCandidates(items = []) {
@@ -124,11 +222,96 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
       asset.dispose();
     }
   }
+  // Parsed-model cache: switching back to a character that is still in memory
+  // skips the download and the whole PMX/FBX parse. Every entry holds exactly one
+  // retained reference, so evicting releases only the cache's share — a model an
+  // actor is still wearing stays alive, and the last release disposes it.
+  const ASSET_CACHE_LIMIT = 2;
+  const assetCache = new Map();
+  function cacheKey(selected) {
+    if (selected?.libraryId) return `lib:${selected.libraryId}`;
+    const file = selected?.file;
+    return file ? `file:${file.name}:${file.size}:${file.lastModified}` : null;
+  }
+  function cacheAsset(key, asset) {
+    const existing = assetCache.get(key);
+    if (existing === asset) {
+      // refresh recency without touching the reference it already holds
+      assetCache.delete(key);
+      assetCache.set(key, asset);
+      return;
+    }
+    if (existing) release(existing);
+    assetCache.set(key, asset);
+    while (assetCache.size > ASSET_CACHE_LIMIT) {
+      const oldest = assetCache.keys().next().value;
+      const dropped = assetCache.get(oldest);
+      assetCache.delete(oldest);
+      release(dropped);
+    }
+  }
+  function dropCachedAsset(key) {
+    const asset = key ? assetCache.get(key) : null;
+    if (!asset) return;
+    assetCache.delete(key);
+    release(asset);
+  }
   function dispose(entry) {
     if (!entry) return;
     entry.asset.releaseClone(entry.mesh);
     release(entry.asset);
   }
+  /**
+   * Render the one-time thumbnail for a library entry that does not have one.
+   * The asset decides the look: its own materials when the textures resolved,
+   * the white look otherwise. Never fatal: a failure only leaves the placeholder.
+   */
+  async function ensureThumbnail(asset, libraryId, { quiet = false } = {}) {
+    if (!libraryId || !asset) return false;
+    const stored = catalog.models.find((item) => item.id === libraryId);
+    if (!stored || stored.hasThumb) return false;
+    try {
+      if (!quiet) setText($("pmxStatus"), m("character.thumbnail_rendering"));
+      const shot = await renderCharacterThumbnail(asset);
+      await api.setCharacterThumbnail(libraryId, shot.dataUrl);
+      stored.hasThumb = true;
+      return true;
+    } catch (cause) {
+      console.warn("character thumbnail failed:", cause);
+      return false;
+    }
+  }
+
+  /**
+   * Fill in the cards that never got a thumbnail (older libraries). Serial and
+   * silent: each entry is loaded, rendered once and released before the next,
+   * so opening the picker cannot pile several characters into memory.
+   */
+  let thumbnailFill = null;
+  function maybeFillThumbnails(signal) {
+    if (!catalogReady || thumbnailFill || !dialog.open) return;
+    const fill = thumbnailFill = new Promise((resolve) => setTimeout(resolve, 1200))
+      .then(() => fillMissingThumbnails(signal))
+      .finally(() => { if (thumbnailFill === fill) thumbnailFill = null; });
+  }
+  async function fillMissingThumbnails(signal) {
+    const pending = catalog.models.filter((entry) => !entry.hasThumb);
+    console.info("thumbnail fill: queued", pending.length, catalog.models.length);
+    for (const item of pending) {
+      if (signal.aborted || !dialog.open) return;
+      let asset = null;
+      try {
+        asset = await loadAsset({ kind: item.kind, libraryId: item.id }, signal);
+        console.info("thumbnail fill: rendering", item.name);
+        if (await ensureThumbnail(asset, item.id, { quiet: true }) && dialog.open) renderLibrary();
+      } catch (cause) {
+        if (!signal.aborted) console.warn("thumbnail fill failed:", item.name, cause);
+      } finally {
+        if (asset) release(asset);
+      }
+    }
+  }
+
   function attach(actor, entry) {
     dispose(actor.character);
     actor.character = entry;
@@ -144,9 +327,14 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
   async function loadAsset(selected, signal) {
     const used = selected.libraryId && getActors().find(({ character }) => character?.libraryId === selected.libraryId);
     if (used) return retain(used.character.asset);
+    const key = cacheKey(selected);
+    const cached = key ? assetCache.get(key) : null;
+    if (cached) {
+      cacheAsset(key, cached);      // mark as most recent
+      return retain(cached);
+    }
     const load = selected.kind === "fbx" ? (await import("./fbx-character-asset.js")).loadFbxCharacter
-      : selected.kind === "vrm" ? (await import("./vrm-asset.js")).loadVrmCharacter
-        : (await import("./pmx-asset.js")).loadPmxAsset;
+      : (await import("./pmx-asset.js")).loadPmxAsset;
     const options = { signal };
     const native = selected.libraryId ? await api.openLibraryCharacter(selected.libraryId, signal) : selected.native;
     let file = selected.file, resources = files;
@@ -158,22 +346,41 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
     }
     const asset = await load(resources, file, options);
     asset.poseStorageKey = `flowhmr-pose-offsets:${selected.kind}:${file.name}:${file.size}:${asset.name}`;
+    if (key) {
+      retain(asset);                // the cache's own reference
+      cacheAsset(key, asset);
+    }
     return retain(asset);
   }
   async function prepare(actor, selected, signal) {
+    // Stage timings, kept on window so switching cost can be profiled from the
+    // console instead of guessed at. Milliseconds.
+    const tLoad = performance.now();
     const asset = await loadAsset(selected, signal);
+    const tAsset = performance.now();
     let mesh;
     try {
-      const isPmx = asset.kind === "pmx";
+      const isFbx = asset.kind === "fbx";
       const [retarget, motion] = await Promise.all([
-        isPmx ? import("./pmx-retarget.js") : import("./fbx-character-retarget.js"),
+        isFbx ? import("./fbx-character-retarget.js") : import("./pmx-retarget.js"),
         actor.character?.motion ?? api.getCharacterMotion(actor.id, signal),
       ]);
       signal.throwIfAborted();
       if (motion.frames !== actor.meta.num_frames) throw appError("server.pmx_motion");
+      const tMotion = performance.now();
       mesh = asset.clone();
-      const rig = isPmx ? retarget.createPmxRetarget(mesh, asset.rest, motion)
-        : retarget.createFbxCharacterRetarget(mesh, asset, motion);
+      const tClone = performance.now();
+      const rig = isFbx ? retarget.createFbxCharacterRetarget(mesh, asset, motion)
+        : retarget.createPmxRetarget(mesh, asset.rest, motion);
+      const tRig = performance.now();
+      window.__charTiming = {
+        asset: +(tAsset - tLoad).toFixed(1),
+        motion: +(tMotion - tAsset).toFixed(1),
+        clone: +(tClone - tMotion).toFixed(1),
+        retarget: +(tRig - tClone).toFixed(1),
+        total: +(tRig - tLoad).toFixed(1),
+        bones: mesh.skeleton?.bones.length ?? 0,
+      };
       mesh.traverse((object) => {
         if (object.isMesh) object.castShadow = object.receiveShadow = true;
       });
@@ -188,15 +395,17 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
   function writeFor(actor, write) {
     const next = (writes.get(actor.id) ?? Promise.resolve()).catch(() => {}).then(write);
     writes.set(actor.id, next);
-    const clear = () => {
-      if (writes.get(actor.id) === next) writes.delete(actor.id);
-      if (remotePending) void syncRemoteCharacters();
-    };
+    const clear = () => { if (writes.get(actor.id) === next) writes.delete(actor.id); };
     next.then(clear, clear);
     return next;
   }
   function applyPose(entry, offsets) {
-    entry.poseOffsets = entry.rig.setPoseOffsets(offsets);
+    if (entry.asset.kind !== "fbx") {
+      entry.poseOffsets = entry.rig.setPoseOffsets(offsets);
+      return;
+    }
+    entry.poseOffsets = normalizePoseOffsets(offsets);
+    entry.rig.setPoseOffsets(entry.poseOffsets);
   }
   function editPose(entry, offsets) {
     applyPose(entry, offsets);
@@ -225,58 +434,6 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
     }).catch((cause) => { if (actor.character === entry) onRestoreError(cause); });
   }
 
-  // MCP edits use the same server preferences as the GUI. Only synchronize
-  // idle actors; local pending edits keep ownership until their save completes.
-  const remoteSignatures = new Map();
-  async function syncRemoteCharacters() {
-    const actors = getActors();
-    if (!actors.length || remoteRead || operation || restoring || catalogRead || picking || writes.size) return;
-    remotePending = false;
-    const read = remoteRead = new AbortController();
-    try {
-      const next = await api.getCharacterLibrary(actors, read.signal);
-      read.signal.throwIfAborted();
-      if (actors.some((actor) => !getActors().includes(actor)) || operation || picking || writes.size) return;
-      catalog = next;
-      if (dialog.open) { renderLibrary(librarySelect.value); sync(); }
-      for (const actor of actors) {
-        const saved = assignment(actor);
-        const signature = JSON.stringify(saved);
-        if (remoteSignatures.get(actor.id) === signature) continue;
-        if (saved.id && readStoredPose(editKey(actor, saved.id))) continue;
-        if (!saved.id) {
-          if (actor.character?.libraryId) attach(actor, null);
-        } else if (actor.character?.libraryId === saved.id) {
-          applyPose(actor.character, saved.offsets);
-          notifyChange();
-        } else {
-          const item = catalog.models.find((model) => model.id === saved.id);
-          if (!item) throw appError('server.character_library_missing');
-          const entry = await prepare(actor, { kind: item.kind, libraryId: item.id }, read.signal);
-          if (read.signal.aborted || !getActors().includes(actor) || operation || picking || writes.size) {
-            dispose(entry);
-            return;
-          }
-          applyPose(entry, saved.offsets);
-          attach(actor, entry);
-        }
-        remoteSignatures.set(actor.id, signature);
-      }
-    } catch (cause) {
-      if (!read.signal.aborted) onRestoreError(cause);
-    } finally {
-      if (remoteRead === read) remoteRead = null;
-      if (remotePending) void syncRemoteCharacters();
-    }
-  }
-  window.addEventListener('flowhmr:server-update', event => {
-    if (['characters', 'resync'].includes(event.detail.kind)) {
-      remotePending = true;
-      void syncRemoteCharacters();
-    }
-  });
-  window.addEventListener('pagehide', () => remoteRead?.abort());
-
   async function open() {
     if (dialog.open || !currentActor()) return;
     setError();
@@ -291,6 +448,14 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
       catalog = await api.getCharacterLibrary(getActors(), read.signal);
       catalogReady = true;
       refresh();
+      // The character already in the viewport needs no reload to get a
+      // thumbnail: its asset is live, so fill the card in the background.
+      const active = getActors().map((actor) => actor.character).find((entry) => entry?.libraryId);
+      if (active) void ensureThumbnail(active.asset, active.libraryId).then((done) => {
+        if (done && dialog.open) renderLibrary();
+      });
+      // Then work through the rest of the library, one entry at a time.
+      maybeFillThumbnails(read.signal);
     } catch (cause) {
       if (!read.signal.aborted && picker()) setError(cause);
     } finally {
@@ -319,6 +484,14 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
     setText($("pmxStatus"), status());
     sync();
   };
+  searchInput.addEventListener("input", () => {
+    searchText = searchInput.value.trim().toLowerCase();
+    renderLibrary();
+  });
+  kindFilter.addEventListener("change", () => {
+    filterKind = kindFilter.value;
+    renderLibrary();
+  });
   remove.onclick = () => {
     if (remove.disabled) return;
     removing = libraryChoice();
@@ -343,6 +516,8 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
       const result = await api.deleteLibraryCharacter(item.id, getActors());
       run.signal.throwIfAborted();
       catalog = result.catalog;
+      // The model is gone from disk, so its parsed copy must not linger.
+      dropCachedAsset(`lib:${item.id}`);
       try {
         for (const key of Object.keys(localStorage)) {
           if (key.startsWith("flowhmr-character-edit:") && key.endsWith(`:${item.id}`)) localStorage.removeItem(key);
@@ -380,6 +555,9 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
     setError(candidates.length ? "" : m("character.no_model"));
     renderLibrary("");
     sync();
+    // A single pick needs nothing else: applying it right away saves the extra
+    // trip to the 应用 button. Multiple candidates still wait for a choice.
+    if (candidates.length === 1 && !apply.disabled) apply.click();
   }
   folder.onchange = () => chooseFiles(folder);
   input.onchange = () => chooseFiles(input);
@@ -413,14 +591,85 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
       }
     }
   };
+  // Bulk import: one folder pick, then every PMX/FBX inside it is loaded,
+  // rendered, stored in the library and given a thumbnail — strictly one at a
+  // time so memory and GPU texture uploads stay flat regardless of how many
+  // models the folder holds.
+  batchButton?.addEventListener("click", async () => {
+    const pick = pickerFolder();
+    if (!pick || operation) return;
+    const run = operation = new AbortController();
+    setError();
+    sync();
+    try {
+      const result = await pick.call(window.pywebview.api);
+      if (!result) return;
+      if (result.error) throw appError("server.character_file");
+      const items = Array.isArray(result.items) ? result.items : [];
+      const failed = Array.isArray(result.failed) ? [...result.failed] : [];
+      if (!items.length) {
+        setError(m("character.batch_empty"));
+        return;
+      }
+      let ok = 0;
+      const added = [];
+      for (const [index, item] of items.entries()) {
+        if (run.signal.aborted) break;
+        const kind = kindOf(item.name);
+        if (!kind) {
+          failed.push(item.name);
+          continue;
+        }
+        setText($("pmxStatus"), m("character.importing", { index: index + 1, total: items.length, name: item.name }));
+        let asset = null;
+        try {
+          asset = await loadAsset({ kind, native: item }, run.signal);
+          // Store first, draw later: the thumbnail is the single most expensive
+          // step (texture upload + shader compile) and holding it here would
+          // stall the whole batch. fillMissingThumbnails() catches up after.
+          const stored = await api.saveLibraryCharacter(item.ticket, asset.name);
+          if (!catalog.models.some(({ id }) => id === stored.id)) catalog.models.push(stored);
+          added.push(stored);
+          ok += 1;
+        } catch (cause) {
+          if (run.signal.aborted) break;
+          console.warn("character batch import failed:", item.name, cause);
+          failed.push(item.name);
+        } finally {
+          if (asset) release(asset);
+        }
+      }
+      catalogReady = true;
+      renderLibrary();
+      setText($("pmxStatus"), failed.length
+        ? m("character.import_partial", { ok, failed: failed.length })
+        : m("character.import_done", { ok }));
+      // Thumbnails catch up in the background, one at a time.
+      if (added.length) setTimeout(() => fillMissingThumbnails(), 0);
+      pendingApply = added[0]?.id ?? null;
+    } catch (cause) {
+      if (!run.signal.aborted) setError(cause);
+    } finally {
+      if (operation === run) operation = null;
+      sync();
+      // One folder pick should be enough: apply the first imported character
+      // instead of making the user select it and press 应用 by hand.
+      if (pendingApply) {
+        const id = pendingApply;
+        pendingApply = null;
+        librarySelect.value = id;
+        librarySelect.dispatchEvent(new Event("change"));
+        if (!apply.disabled) apply.click();
+      }
+    }
+  });
   restore.onclick = async () => {
     const actor = currentActor();
     if (!actor || operation) return;
     const run = operation = new AbortController();
     setError();
     sync();
-    try {
-      if (catalogReady || actor.character?.libraryId) {
+    try {      if (catalogReady || actor.character?.libraryId) {
         await writeFor(actor, () => api.saveActorCharacter(actor, null, null, true));
         catalog.actors[actor.id] = { ...catalog.actors[actor.id], id: null };
         catalog.defaults[slot(actor)] = { id: null };
@@ -472,18 +721,23 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
       }
       run.signal.throwIfAborted();
       const id = entry.libraryId;
+      // Attach before the bookkeeping. Generating the thumbnail and persisting
+      // the assignment are not needed for the swap to look done, and awaiting
+      // them here added about 50 ms of dead time to every character switch.
       const previous = actor.character?.libraryId === id && id ? actor.character.poseOffsets : null;
       const remembered = id ? readStoredPose(editKey(actor, id)) ?? catalog.actors[actor.id]?.poses?.[id]
         ?? catalog.presets[id] : readStoredPose(temporaryKey(entry));
       applyPose(entry, previous ?? remembered ?? readStoredPose(entry.asset.poseStorageKey));
-      if (id) {
-        await writeFor(actor, () => api.saveActorCharacter(actor, id, entry.poseOffsets, true));
-        catalogReady = true;
-      }
-      run.signal.throwIfAborted();
+      const asset = entry.asset;
+      const offsets = entry.poseOffsets;
       attach(actor, entry);
       entry = null;
       dialog.close("apply");
+      void ensureThumbnail(asset, id).catch(() => {});
+      if (id) {
+        void writeFor(actor, () => api.saveActorCharacter(actor, id, offsets, true))
+          .then(() => { catalogReady = true; }, () => {});
+      }
     } catch (cause) {
       if (!run.signal.aborted) {
         setText($("pmxStatus"), status());
@@ -505,8 +759,6 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
     get focused() { return currentActor(); },
     get active() { return currentActor()?.character?.asset ?? getActors().find((actor) => actor.character)?.character.asset; },
     releaseActors(actors) {
-      remoteRead?.abort();
-      remoteSignatures.clear();
       operation?.abort();
       restoring?.abort();
       catalogRead?.abort();
@@ -560,6 +812,9 @@ export function initPreviewCharacter(getActors, onChange, onRestoreError) {
           if (dialog.open) refresh();
           else sync();
           if (error && !run.signal.aborted) onRestoreError(error);
+          // open() bails out while a restore is running, so the picker that was
+          // opened during startup still gets its missing thumbnails.
+          maybeFillThumbnails(run.signal);
         }
       }
     },

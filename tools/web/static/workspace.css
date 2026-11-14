@@ -81,7 +81,7 @@ body { height: 100dvh; }
   display: block; width: auto; min-width: 0; min-height: 0; padding: 0; overflow: auto;
   background: var(--card); border: 1px solid var(--card-border); scrollbar-width: thin;
 }
-.source-editor { grid-area: source; container: source-editor / size; }
+.source-editor { grid-area: source; container-type: size; }
 .properties-editor { grid-area: properties; display: grid; grid-template-rows: var(--history-size, 30%) 4px minmax(0, 1fr); overflow: hidden; gap: 0; }
 .property-content, .history-scroll { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .card { backdrop-filter: none; }
@@ -97,49 +97,14 @@ body { height: 100dvh; }
 .card-head { margin-bottom: 9px; }
 .sidebar .dropzone, .sidebar .file-row, .sidebar .person, .sidebar .run, .sidebar .preview-stage { border-radius: 4px; }
 .source-editor .preview-stage { aspect-ratio: var(--video-ratio, 16 / 10); max-height: clamp(115px, calc(100cqh - 135px), 760px); }
-/* Keep the video and confirmation in view while the candidate tracks scroll. */
-.source-editor:has(#personCard.attention) { display: flex; flex-direction: column; gap: 0; overflow: hidden; }
-.source-editor:has(#personCard.attention) .source-video-card {
-  display: flex; flex-direction: column; min-height: 0; padding: 6px 8px;
-}
-.source-editor:has(#personCard.attention) .source-video-card > :not(.preview-stage) { flex: none; }
-.source-editor:has(#personCard.attention) .source-video-card .card-head { margin-bottom: 3px; }
-.source-editor:has(#personCard.attention) .preview-stage {
-  min-height: 0; margin-top: 4px; max-height: min(56cqh, 470px);
-}
-.source-editor:has(#personCard.attention) .source-video-card .dropzone { padding: 3px 6px; }
-.source-editor:has(#personCard.attention) .source-video-card :is(.drop-icon, .drop-sub) { display: none; }
-.sidebar #personCard.attention {
-  display: flex; flex-direction: column; flex: 1 0 max(min(182px, 58cqh), min(250px, 48cqh));
-  min-height: 0; padding: 6px 8px;
-}
-#personCard.attention > :not(.person-list) { flex: none; }
-#personCard.attention :is(.card-title, .card-help, .person-list) { margin-bottom: 4px; }
-#personCard.attention .person-list {
-  min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 3px;
-}
-#personCard.attention .person { flex: none; padding-block: 4px; }
-#personCard.attention .person-thumb { width: 32px; height: 42px; }
-#personCard.attention .person-name, #personCard.attention .person-tag { white-space: nowrap; }
-#personCard.attention .person-tag { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-#personCard.attention #personConfirm { padding: 4px 6px; font-size: 12px; }
-@container source-editor (max-height: 380px) {
-  #personCard.attention #personCount { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-}
-@container source-editor (max-height: 300px) {
-  .source-editor:has(#personCard.attention) .source-video-card:has(#previewBox:not(.hidden)) .dropzone { display: none; }
-  #personCard.attention #personTitle {
-    position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
-  }
-}
-@container source-editor (max-width: 205px) {
-  #personCard.attention .person { gap: 6px; padding-inline: 5px 26px; }
-  #personCard.attention .person-thumb { width: 26px; height: 36px; }
-  #personCard.attention .person-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #personCard.attention :is(.person-dot, .person-tag) { display: none; }
-  #personCard.attention .person-check { width: 16px; height: 16px; right: 5px; }
-  #personCard.attention #personConfirm { padding-inline: 3px; font-size: 11px; }
-}
+/* Framing controls sit above the stage; contain is the browser default, cover
+   is what the toggle adds. layout() in preview.js mirrors this exact choice. */
+.preview-options { display: flex; align-items: center; gap: 10px; margin: 0 0 7px; font-size: 11px; color: var(--muted); }
+.preview-option { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.preview-option .input { height: 22px; padding: 0 4px; font-size: 11px; }
+.preview-option.check input { margin: 0; accent-color: var(--accent); }
+.preview-stage[data-fill="cover"] #previewVideo { object-fit: cover; }
+.source-editor:has(#personCard.attention) .preview-stage { max-height: clamp(125px, 56cqh, 470px); }
 #previewIssue { margin: 7px 0 0; }
 .dropzone { padding: 22px 10px; border-width: 1px; }
 .drop-title { color: var(--text); font-size: 13px; font-weight: 600; }
@@ -248,21 +213,6 @@ body { height: 100dvh; }
 }
 .model-dialog[open] { display: flex; flex-direction: column; }
 .model-dialog::backdrop { background: #0008; }
-.job-warning { color: var(--model-warning); }
-.update-button.has-update { border-color: var(--active); }
-.update-dialog { position: fixed; inset: 38px 12px auto auto; z-index: 35; width: min(370px, calc(100vw - 24px)); margin: 0; }
-.update-details { display: grid; gap: 6px; padding: 12px; font-size: 12px; min-height: 0; overflow: auto; }
-.update-details p { margin: 0; }
-.update-notes { margin-top: 4px; padding-top: 7px; border-top: 1px solid var(--line); }
-.update-notes h3 { margin: 0 0 4px; font-size: inherit; }
-#updateNotesText { max-height: min(30dvh, 216px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
-#updateVersion { color: var(--muted); }
-#updateProgress { width: 100%; height: 7px; accent-color: var(--active); }
-.update-dialog a { color: var(--text); }
-.update-history { margin-top: 4px; padding-top: 7px; border-top: 1px solid var(--line); }
-.update-version-actions, .fbx-template-controls { display: flex; align-items: center; gap: 7px; margin-top: 5px; }
-.update-version-actions select, .fbx-template-controls input { flex: 1; min-width: 0; }
-#updateLegacyNote { color: var(--muted); margin-top: 5px; }
 .model-dialog-head, .model-dialog-foot, .model-location { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
 .model-dialog-head, .model-dialog-foot { justify-content: space-between; background: var(--editor-head); }
 .model-dialog-head { border-bottom: 1px solid var(--line); }
@@ -379,7 +329,116 @@ body { height: 100dvh; }
 .viewport-menus, .viewport-header .downloads { display: flex; align-items: center; min-width: 0; gap: 6px; }
 .viewport-header .downloads { flex-shrink: 0; }
 .viewport-header .downloads a { padding: 3px 6px; font-size: 11px; border-radius: 3px; }
-.mode-label { padding: 3px 6px; border-radius: 3px; background: var(--card); font-size: 11px; white-space: nowrap; }
+/* Segmented control: one gesture for the header view mode and the left-button
+   behaviour, so "pick one of N" always looks and works the same. */
+.segmented, .mode-switch {
+  display: inline-flex; align-items: stretch; flex-shrink: 0;
+  border: 1px solid var(--line); border-radius: 4px; overflow: hidden; background: var(--card);
+}
+.segmented button, .mode-switch button {
+  appearance: none; border: 0; background: transparent; color: var(--muted);
+  font: 12px/1 var(--font); height: 24px; padding: 0 9px; cursor: pointer;
+  display: inline-flex; align-items: center; white-space: nowrap;
+}
+.segmented button + button, .mode-switch button + button { border-left: 1px solid var(--line); }
+.segmented button:hover:not(:disabled),
+.mode-switch button:hover:not(:disabled) { color: var(--text); background: var(--editor-head); }
+.segmented button[aria-pressed="true"],
+.mode-switch button[aria-pressed="true"] { background: var(--active); color: #fff; font-weight: 600; }
+.segmented button:disabled, .mode-switch button:disabled { opacity: .4; cursor: default; }
+/* Merged display menu: the summary carries the current mode, the popup marks it. */
+.display-menu > summary { display: inline-flex; align-items: center; gap: 5px; }
+.display-menu > summary b { font-weight: 600; }
+.display-popup { min-width: 156px; }
+.display-popup button {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px; width: 100%;
+}
+.display-popup button[aria-pressed="true"] { background: var(--active); color: #fff; }
+.display-popup button[aria-pressed="true"] kbd { color: #fff; opacity: .75; }
+.display-popup kbd { font-size: 10px; opacity: .55; }
+
+/* Boot splash and in-viewport loading bar. Both are indeterminate: the pipeline
+   reports whole stages, not percentages, so a sliding bar tells the truth about
+   "still working" without inventing a number. */
+.boot-splash {
+  position: fixed; inset: 0; z-index: 9000; display: grid; place-items: center;
+  background: #1b1b1f; transition: opacity .28s ease;
+}
+.boot-splash.done { opacity: 0; pointer-events: none; }
+.boot-card { display: grid; justify-items: center; gap: 14px; width: min(320px, 70vw); }
+.boot-name { font: 600 20px/1 var(--font, system-ui); letter-spacing: .08em; color: #e8e8ee; }
+.boot-bar, .vl-bar {
+  position: relative; overflow: hidden; border-radius: 999px;
+  background: rgba(255, 255, 255, .12);
+}
+.boot-bar { width: 100%; height: 4px; }
+.vl-bar { width: 190px; height: 3px; }
+.boot-bar > i, .vl-bar > i {
+  position: absolute; inset: 0 auto 0 0; width: 38%; border-radius: inherit;
+  background: linear-gradient(90deg, transparent, #7aa2ff, transparent);
+  animation: flowhmr-slide 1.05s ease-in-out infinite;
+}
+@keyframes flowhmr-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(320%); }
+}
+.boot-text { margin: 0; font-size: 12px; color: #9a9aa6; text-align: center; }
+.viewer-loading {
+  position: absolute; inset: 0; z-index: 20; display: grid; place-items: center;
+  background: rgba(24, 24, 28, .55); backdrop-filter: blur(1px);
+  transition: opacity .2s ease;
+}
+.viewer-loading.done { opacity: 0; pointer-events: none; }
+.vl-card {
+  display: grid; justify-items: center; gap: 10px; padding: 16px 22px; border-radius: 8px;
+  background: rgba(30, 30, 36, .92); box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
+}
+.vl-text { font-size: 12px; color: #b9bcc8; }
+
+/* Cloth solve: modal over the viewport, centred, with the frame counter that makes
+   the one-frame-at-a-time bake legible. */
+.cloth-overlay {
+  position: absolute; inset: 0; z-index: 24; display: grid; place-items: center;
+  background: rgba(24, 24, 28, .55); backdrop-filter: blur(1px);
+}
+.cloth-overlay.hidden { display: none; }
+.cloth-card {
+  display: grid; gap: 10px; padding: 18px 22px; min-width: 300px; border-radius: 10px;
+  background: rgba(30, 30, 36, .96); box-shadow: 0 10px 32px rgba(0, 0, 0, .42);
+  text-align: center;
+}
+.cloth-card h3 { margin: 0; font-size: 13px; font-weight: 600; color: #e8eaf2; }
+.cloth-bar {
+  position: relative; overflow: hidden; height: 5px; border-radius: 999px;
+  background: rgba(255, 255, 255, .12);
+}
+.cloth-bar > i {
+  display: block; height: 100%; width: 0%; border-radius: 999px;
+  background: linear-gradient(90deg, #7aa2ff, #9dc0ff); transition: width .08s linear;
+}
+.cloth-progress { margin: 0; font-size: 12px; color: #cdd1dd; font-variant-numeric: tabular-nums; }
+.cloth-note { margin: 0; font-size: 11px; color: #8f94a6; min-height: 14px; }
+.cloth-actions { display: flex; gap: 8px; justify-content: center; }
+.cloth-params { text-align: left; font-size: 11px; color: #a9aebb; }
+.cloth-params summary { cursor: pointer; color: #8f94a6; }
+.cloth-params label { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.cloth-params input[type="range"] { flex: 1; min-width: 90px; }
+
+/* Cloth dynamics lane on the timeline: deflection curve of the baked solve. */
+.cloth-lane {
+  display: flex; align-items: center; gap: 10px; padding: 2px 12px;
+  border-top: 1px solid var(--line);
+}
+.cloth-lane-body {
+  position: relative; flex: 1; min-width: 0; height: 26px;
+  border-radius: 4px; background: rgba(255, 255, 255, .04); overflow: hidden;
+}
+#clothLaneCanvas { display: block; width: 100%; height: 26px; }
+.cloth-lane-hint {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  font-size: 10px; color: #7d8294; pointer-events: none;
+}
+.cloth-lane-hint.hidden { display: none; }
 .viewport-menus .result-info { white-space: nowrap; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
 .editor-icon {
   display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 23px;
@@ -397,11 +456,15 @@ body { height: 100dvh; }
 .viewport-label strong { font-weight: 600; }
 .viewport-label span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
 .viewport-toolbar {
-  position: absolute; top: 48px; left: 6px; display: flex; flex-direction: column; gap: 2px;
-  padding: 2px; border: 1px solid var(--line); background: var(--editor-head); border-radius: 4px;
+  position: absolute; top: 44px; left: 8px; display: flex; align-items: center; gap: 6px;
 }
-.viewport-toolbar .editor-icon { width: 28px; height: 27px; }
-.viewport-toolbar svg { width: 18px; height: 18px; }
+.viewport-toolbar .segmented, .viewport-toolbar .vt-plain { box-shadow: 0 1px 3px #00000014; }
+.viewport-toolbar .vt-plain {
+  appearance: none; height: 24px; padding: 0 9px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  font: 12px/1 var(--font); display: inline-flex; align-items: center; white-space: nowrap;
+}
+.viewport-toolbar .vt-plain:hover { color: var(--text); border-color: var(--accent); }
 .view-gizmo { position: absolute; top: 3px; right: 7px; width: 92px; height: 92px; isolation: isolate; }
 .view-gizmo svg { position: absolute; inset: 0; width: 92px; height: 92px; pointer-events: none; }
 .view-gizmo .gizmo-x { --axis: var(--axis-x); }
@@ -420,13 +483,113 @@ body { height: 100dvh; }
   max-width: calc(100% - 24px); padding: 8px 14px; background: var(--editor-head);
   border: 1px solid var(--line); border-radius: 4px; color: var(--text); font-size: 13px;
 }
+/* Bottom-right: the three things you touch constantly stay direct; the rest
+   folds into one menu, so a switch costs one click instead of three. */
 .viewer-tools, :root[data-theme="dark"] .viewer-tools {
-  top: auto; bottom: 8px; right: 8px; gap: 8px; padding: 4px 8px; flex-wrap: wrap;
-  max-width: calc(100% - 95px); background: var(--editor-head); border-radius: 4px;
+  top: auto; bottom: 8px; right: 8px; gap: 6px; padding: 0; flex-wrap: nowrap;
+  max-width: calc(100% - 95px); background: transparent; border: 0;
 }
-.viewer-tools input { accent-color: var(--accent); }
-.viewer-tools label { white-space: nowrap; }
-.viewer-tools label:has(input:disabled) { opacity: .55; cursor: default; }
+.vt-select, .vt-pill, .vt-group > summary {
+  height: 22px; border-radius: 4px; font: 11px var(--font); box-shadow: 0 1px 4px #0000001a;
+  background: rgba(255, 255, 255, .88); color: #2a2a2e; border: 1px solid rgba(0, 0, 0, .14);
+}
+:root[data-theme="dark"] .vt-select,
+:root[data-theme="dark"] .vt-pill,
+:root[data-theme="dark"] .vt-group > summary {
+  background: rgba(24, 24, 28, .84); color: #e8e8e8; border-color: rgba(255, 255, 255, .16);
+}
+.vt-select { padding: 0 6px; cursor: pointer; }
+.vt-pill { display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; cursor: pointer; }
+.vt-pill:hover, .vt-select:hover { border-color: var(--accent); }
+.vt-pill input { accent-color: var(--accent); }
+.vt-pill:has(input:disabled) { opacity: .5; cursor: default; }
+.vt-group { position: relative; }
+.vt-group > summary {
+  list-style: none; display: inline-flex; align-items: center; justify-content: center;
+  min-width: 26px; padding: 0 8px; cursor: pointer; user-select: none; font-size: 13px;
+}
+.vt-group > summary::-webkit-details-marker { display: none; }
+.vt-group > summary::marker { content: ""; }
+.vt-group > summary:hover { border-color: var(--accent); }
+.vt-group[open] > summary { border-color: var(--accent); }
+.vt-popup {
+  position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 30;
+  display: flex; flex-direction: column; gap: 7px; min-width: 196px;
+  padding: 9px 11px; border-radius: 6px; background: var(--editor-head);
+  border: 1px solid var(--line); box-shadow: 0 10px 28px #00000059;
+}
+.vt-popup label { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
+.vt-popup input { accent-color: var(--accent); }
+.vt-popup label:has(input:disabled) { opacity: .55; cursor: default; }
+.vt-popup .vt-range { justify-content: space-between; }
+.vt-popup .vt-range input { width: 96px; height: 14px; }
+.vt-popup .vt-range span { color: var(--muted); }
+.viewer-stats {
+  position: absolute; top: 10px; right: 106px; padding: 3px 7px; border-radius: 4px;
+  background: var(--editor-head); color: var(--muted); font: 11px ui-monospace, monospace;
+  pointer-events: none; white-space: nowrap; border: 1px solid var(--line);
+}
+
+/* ------------------------------------------------------- character picker */
+.character-dialog { width: min(880px, calc(100vw - 48px)); max-width: none; }
+.character-dialog form { display: flex; flex-direction: column; gap: 10px; }
+.character-picker { display: grid; grid-template-columns: minmax(0, 1fr) 292px; gap: 14px; }
+.character-browser { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.character-browser-head { display: flex; gap: 8px; }
+.character-browser-head .input { height: 26px; }
+#characterSearch { flex: 1; min-width: 0; }
+.character-filter {
+  width: 104px; flex: none; padding: 2px 6px; text-align: left;
+  color: var(--text); background: var(--card);
+}
+.character-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(94px, 1fr)); gap: 8px;
+  overflow-y: auto; max-height: 322px; padding: 2px; align-content: start;
+}
+.character-card {
+  display: flex; flex-direction: column; gap: 4px; padding: 4px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--card); cursor: pointer; text-align: left;
+}
+.character-card:hover { border-color: var(--accent); }
+.character-card.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.character-card-figure {
+  position: relative; display: block; aspect-ratio: 1 / 1; border-radius: 4px; overflow: hidden;
+  background: repeating-conic-gradient(var(--editor-head) 0% 25%, var(--card) 0% 50%) 50% / 12px 12px;
+}
+.character-card-figure img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.character-card-figure.placeholder::after { content: ""; position: absolute; inset: 0; background: var(--editor-head); }
+.character-card-badge {
+  position: absolute; right: 3px; bottom: 3px; padding: 0 4px; border-radius: 3px;
+  background: #000000a6; color: #fff; font: 9px ui-monospace, monospace; letter-spacing: .04em;
+}
+.character-card-name {
+  font-size: 11px; line-height: 1.25; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.character-empty { margin: 0; color: var(--muted); font-size: 12px; }
+.character-detail {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  border-left: 1px solid var(--line); padding-left: 12px;
+}
+.character-preview-frame {
+  position: relative; aspect-ratio: 1 / 1; border-radius: 6px; overflow: hidden;
+  background: repeating-conic-gradient(var(--editor-head) 0% 25%, var(--card) 0% 50%) 50% / 16px 16px;
+  display: grid; place-items: center;
+}
+.character-preview-frame img { width: 100%; height: 100%; object-fit: contain; }
+.character-preview-badge {
+  position: absolute; right: 6px; bottom: 6px; padding: 1px 6px; border-radius: 3px;
+  background: #000000b3; color: #fff; font: 10px ui-monospace, monospace;
+}
+.character-detail-name { font-size: 13px; color: var(--text); word-break: break-word; }
+.character-detail-file { font-size: 11px; color: var(--muted); word-break: break-all; }
+.character-detail-info { font-size: 11px; color: var(--muted); }
+.character-detail-warning { margin: 0; font-size: 11px; color: #b45309; }
+.character-detail-actions { display: flex; justify-content: flex-end; gap: 6px; }
+@media (max-width: 720px) {
+  .character-picker { grid-template-columns: minmax(0, 1fr); }
+  .character-detail { border-left: 0; padding-left: 0; }
+}
 .viewer-hint, :root[data-theme="dark"] .viewer-hint { color: var(--muted); background: var(--editor-head); border-radius: 4px; }
 
 .timeline-editor {
@@ -509,9 +672,6 @@ body { height: 100dvh; }
   }
   .sidebar { overflow: visible; }
   .source-editor { container-type: normal; }
-  .source-editor:has(#personCard.attention) {
-    height: clamp(225px, calc(100dvh - 40px), 640px); container-type: size;
-  }
   .source-editor .preview-stage { max-height: 50dvh; }
   .properties-editor { display: block; }
   .property-content { overflow: visible; }
@@ -528,3 +688,19 @@ body { height: 100dvh; }
   .timeline-head { grid-template-columns: auto 1fr; }
   .timeline-head .controls { justify-content: center; }
 }
+
+
+/* ---------------------------------------------------------------------------
+   The shell is an application, not a document: drag-select on labels, task rows
+   and readouts made the whole window feel like a web page. Editable fields keep
+   normal text behaviour.
+   --------------------------------------------------------------------------- */
+body, .app, .viewer-wrap, .panel, .timeline {
+  -webkit-user-select: none;
+  user-select: none;
+}
+input, textarea, select, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+/* flowhmr-no-select */

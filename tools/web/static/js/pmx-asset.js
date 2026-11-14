@@ -7,6 +7,77 @@ const LOCAL_TEXTURE_PREFIX = "flowhmr-pmx-local:";
 const MAX_TEXTURE_DIMENSION = 16384;
 const MAX_TEXTURE_PIXELS = 67108864;
 
+/**
+ * Fragment tail for the cel look.
+ *
+ * Three cheap additions on top of the MMD toon ramp, no extra texture fetch and
+ * no extra draw call — roughly eight ALU ops per pixel:
+ *   1. rim light  — raking back light on the silhouette, the strongest cue in
+ *                   Wind-Wave-style character shading;
+ *   2. cool shadows — dark areas drift blue, lit areas stay neutral, which is
+ *                   what makes cel shading read as painted rather than grey;
+ *   3. a little contrast so the ramp bands separate.
+ * Everything stays inside the existing material, so MMD sphere maps, toon
+ * gradients and transparency keep working untouched.
+ */
+const CEL_FRAGMENT_TAIL = `
+  {
+    // Unlit floor: the material keeps its own colour in shadow instead of going
+    // muddy grey. This is the "self-lit" feel Wind-Wave characters have, and it
+    // is far cheaper than adding an emissive map or an IBL probe.
+    outgoingLight += diffuseColor.rgb * 0.18;
+
+    vec3 celNormal = normalize( normal );
+    vec3 celView = normalize( vViewPosition );
+    // Narrow, restrained rim: a hair light on the silhouette, not a glow suit.
+    float rim = pow( 1.0 - clamp( dot( celNormal, celView ), 0.0, 1.0 ), 3.4 );
+    outgoingLight += vec3( 0.42, 0.60, 0.95 ) * rim * 0.30;
+
+    float luma = dot( outgoingLight, vec3( 0.2126, 0.7152, 0.0722 ) );
+    vec3 coolShadow = outgoingLight * vec3( 0.86, 0.94, 1.14 );
+    outgoingLight = mix( coolShadow, outgoingLight, smoothstep( 0.04, 0.70, luma ) );
+    outgoingLight = mix( vec3( dot( outgoingLight, vec3( 0.3333 ) ) ), outgoingLight, 1.20 );
+    // Soft shoulder so the unlit floor cannot blow bright cloth to white.
+    outgoingLight = outgoingLight / ( 1.0 + outgoingLight * 0.10 );
+  }
+`;
+
+/** Append the cel tail to one material's fragment shader. */
+function celVariant(base) {
+  for (const anchor of ["#include <opaque_fragment>", "#include <output_fragment>"]) {
+    if (base.includes(anchor)) return base.replace(anchor, `${CEL_FRAGMENT_TAIL}${anchor}`);
+  }
+  return null;
+}
+
+/**
+ * Toggle the cel tail on a material. The untouched-looking base shader is kept
+ * on userData, so switching is a recompile of the same material — no reload, no
+ * second material, no extra draw call.
+ */
+function applyCelShading(material, enabled) {
+  if (!material || typeof material.fragmentShader !== "string") return;
+  if (material.userData.celBase === undefined) {
+    if (!material.fragmentShader.includes("outgoingLight")) return;
+    material.userData.celBase = material.fragmentShader;
+  }
+  const base = material.userData.celBase;
+  const target = enabled ? celVariant(base) : base;
+  if (!target || material.fragmentShader === target) return;
+  material.fragmentShader = target;
+  material.needsUpdate = true;
+}
+
+/** Public toggle used by the viewport when the user flips 三渲二. */
+export function setCelShading(root, enabled) {
+  root?.traverse((node) => {
+    if (!node.isMesh) return;
+    for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
+      if (material?.userData?.celBase !== undefined) applyCelShading(material, enabled);
+    }
+  });
+}
+
 class PmxAssetError extends Error {
   constructor(code, message, cause) {
     super(message, { cause });
@@ -427,11 +498,18 @@ export async function loadPmxAsset(files, selectedFile, { signal, readTexture, u
       // Keep the authored toon ramps and sphere textures but let the viewport's
       // key light shape the model. Many PMX materials use bright MMD ambient
       // and additive matcaps that would otherwise blow out white textures.
-      material.emissive.multiplyScalar(.35);
+      // 0.88 leans the diffuse response onto the gradient ramp: this is the
+      // cel-shaded look MMD authors draw for, while the remaining 12% of
+      // Lambert keeps large curved surfaces from banding.
+      material.emissive.multiplyScalar(.42);
+      // PMX ambient is authored for MMD's flat lighting; at full strength it
+      // lifts the shadows until the toon ramp has nothing left to separate.
+      if (material.ambient?.multiplyScalar) material.ambient.multiplyScalar(0.45);
       material.fragmentShader = material.fragmentShader
         .replace("getGradientIrradiance( geometryNormal, directLight.direction ) * directLight.color",
-          "mix( vec3( max( 0.0, dot( geometryNormal, directLight.direction ) ) ), getGradientIrradiance( geometryNormal, directLight.direction ), 0.45 ) * directLight.color")
-        .replace("outgoingLight += matcapColor.rgb;", "outgoingLight += matcapColor.rgb * 0.25;");
+          "mix( vec3( max( 0.0, dot( geometryNormal, directLight.direction ) ) ), getGradientIrradiance( geometryNormal, directLight.direction ), 0.94 ) * directLight.color")
+        .replace("outgoingLight += matcapColor.rgb;", "outgoingLight += matcapColor.rgb * 0.18;");
+      applyCelShading(material);
     }
     mesh.name = data.metadata.modelName || selectedFile.name;
     mesh.scale.setScalar(unitScale);

@@ -7,9 +7,13 @@ import { appError, message as m, setAttr, setText, t } from "./i18n.js";
 import * as api from "./api.js";
 import { initPreviewCharacter } from "./preview-character.js";
 import { initPoseEditor } from "./pose-editor.js";
+import { setCelShading } from "./pmx-asset.js";
+import { createClothDynamics } from "./cloth-dynamics.js";
+import { openClothSolve, clothSettings, clothEnabled, clothSolving, clearClothTrack, clothTrack, applyClothFrame, updateClothSettings, setClothEnabled, clearClothLane, renderClothLane } from "./cloth-solve.js";
 
 const BODY_STORAGE = "flowhmr-body-variant";
 const MOUSE_MODE_STORAGE = "flowhmr-mouse-mode";
+const CEL_STORAGE = "flowhmr-cel";
 
 function rememberToggle(toggle, key, onChange) {
   const saved = localStorage.getItem(key);
@@ -60,7 +64,12 @@ export function initViewer(preview) {
   const container = $("viewer");
   const scrub = $("scrub");
   const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // The backbuffer must be an integer multiple of CSS pixels. A 1.25 or 1.5
+  // ratio lands MSAA samples off the pixel grid, so thin features (the cel
+  // outline) come out stair-stepped even with antialiasing on. 2x everywhere is
+  // a 4x fill bill, but this scene paints in about 1 ms, so supersampling is the
+  // cheapest way to get a clean line.
+  renderer.setPixelRatio(2);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -69,6 +78,56 @@ export function initViewer(preview) {
   const fromHalf = halfFloatTable();
   let renderRequest = 0, dirty = false, loadController = null;
   let bodyController = null;
+
+  // Frame-time HUD. Two rates are shown side by side because they are
+  // different things: the left value is how often the viewport actually drew,
+  // the right value is the motion's fixed frame rate. Sampling happens around
+  // renderer.render(), never in idle rAF callbacks.
+  //
+  // VIEW_MAX_FPS caps painting. 0 follows the display's refresh rate, which is
+  // what requestAnimationFrame already synchronises to: a hard 120 fights that
+  // cadence on non-divisible panels (144 Hz would quantise down to 72), and the
+  // scene paints in well under a millisecond, so the cap only costs smoothness.
+  const statsToggle = $("optFps"), statsEl = $("viewerStats");
+  const FPS_STORAGE = "flowhmr-show-fps";
+  const VIEW_MAX_FPS = 0;
+  const MIN_PAINT_MS = VIEW_MAX_FPS > 0 ? 1000 / VIEW_MAX_FPS : 0;
+  const SLOW_PAINT_MS = 1000 / 30;   // one motion frame at 30 fps
+  const stats = { lastPaint: 0, gapSum: 0, gapCount: 0, costSum: 0, costMax: 0, slow: 0 };
+  const resetStats = () => Object.assign(stats,
+    { lastPaint: 0, gapSum: 0, gapCount: 0, costSum: 0, costMax: 0, slow: 0 });
+  statsToggle.checked = localStorage.getItem(FPS_STORAGE) === "on";
+  show("viewerStats", statsToggle.checked);
+  statsToggle.addEventListener("change", () => {
+    localStorage.setItem(FPS_STORAGE, statsToggle.checked ? "on" : "off");
+    show("viewerStats", statsToggle.checked);
+    resetStats();
+    setText(statsEl, statsToggle.checked ? "…" : "");
+    invalidate();
+  });
+  function samplePaint(now, cost) {
+    if (!statsToggle.checked) { stats.lastPaint = 0; return; }
+    const gap = stats.lastPaint ? now - stats.lastPaint : 0;
+    stats.lastPaint = now;
+    if (gap > 0 && gap < 2000) {
+      stats.gapSum += gap;
+      stats.gapCount += 1;
+    }
+    stats.costSum += cost;
+    if (cost > stats.costMax) stats.costMax = cost;
+    if (cost > SLOW_PAINT_MS) stats.slow += 1;
+    if (stats.gapCount >= 30) {
+      const gapMean = stats.gapSum / stats.gapCount;
+      const costMean = stats.costSum / stats.gapCount;
+      // Report the timeline's rate, not the clip's sample rate: the number next to
+      // the timeline control is the one the user just changed, and two different
+      // fps values on screen at once read as a bug.
+      const timeline = displayFps();
+      setText(statsEl, `${Math.round(1000 / gapMean)} fps · ${costMean.toFixed(1)} ms │ ${timeline} fps`);
+      Object.assign(stats, { gapSum: 0, gapCount: 0, costSum: 0, costMax: 0, slow: 0 });
+    }
+  }
+  let lastPaint = 0;
   function invalidate() {
     dirty = true;
     if (!renderRequest) renderRequest = requestAnimationFrame(tick);
@@ -93,7 +152,11 @@ export function initViewer(preview) {
   controls.target.copy(defaultTarget);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.minDistance = 0.8;
+  // Close enough to read a face or a seam, but still outside the body: zoom moves
+  // toward the orbit target, so a smaller limit would bury the camera inside the
+  // mesh. The pivot itself never moves on its own — a zoom-to-cursor was tried
+  // and dropped, it turned the wheel into a twitchy chase.
+  controls.minDistance = 0.22;
   controls.maxDistance = 25;
 
   // Custom wheel zoom. The stock OrbitControls (r160) divides the wheel delta by
@@ -114,7 +177,12 @@ export function initViewer(preview) {
   function applyZoom() {
     const dist = camera.position.distanceTo(controls.target);
     if (Math.abs(dist - zoom.target) < 1e-4) return false;
-    const next = dist + (zoom.target - dist) * 0.2;
+    // Easing alone is not enough: from 5 m down to 0.22 m the 20% rule travels
+    // most of a metre in one frame, which reads as a lurch. Cap the per-frame
+    // travel so a burst of wheel notches glides instead.
+    const delta = zoom.target - dist;
+    const step = Math.sign(delta) * Math.min(Math.abs(delta) * 0.2, 0.12);
+    const next = dist + step;
     zoomDir.subVectors(camera.position, controls.target).normalize();
     camera.position.copy(controls.target).addScaledVector(zoomDir, next);
     if (camera === orthographic) updateOrthographic();
@@ -134,7 +202,7 @@ export function initViewer(preview) {
   const SUN_OFFSET = new THREE.Vector3(-2.2, 6, 3.6);  // front-left: shadow falls back-right
   sun.position.copy(SUN_OFFSET);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.mapSize.set(1024, 1024);
   sun.shadow.bias = -0.0004;
   sun.shadow.normalBias = 0.02;
   const fill = new THREE.DirectionalLight(0xe6ebff, 0.55);
@@ -147,10 +215,13 @@ export function initViewer(preview) {
 
   function syncCharacterLighting() {
     const custom = !!character.active;
-    ambient.intensity = custom ? .62 : 1.4;
-    sun.intensity = custom ? 1.42 : 1.9;
-    fill.intensity = custom ? .28 : .55;
-    rim.intensity = custom ? .45 : .7;
+    // A custom character brings its own MMD ambient, so the scene ambient goes
+    // lower than for the bare SMPL body: that is what gives the toon ramp a real
+    // shadow side to step through, and the sun/rim carry the shaping instead.
+    ambient.intensity = custom ? .34 : 1.4;
+    sun.intensity = custom ? 1.68 : 1.9;
+    fill.intensity = custom ? .22 : .55;
+    rim.intensity = custom ? .62 : .7;
   }
 
   // Editor grid over the shadow plane, with the two horizontal world axes.
@@ -194,8 +265,155 @@ export function initViewer(preview) {
   let showSkin = savedSkin === null ? localStorage.getItem("flowhmr-skeleton-only") !== "on" : savedSkin === "on";
   skeletonToggle.checked = showSkeletonOverlay;
   coneToggle.checked = localStorage.getItem("flowhmr-bone-cones") === "on";
+
+  // ---------------------------------------------------------------- appearance
+  // A character FBX may reference textures that no longer exist (absolute paths
+  // from another machine, or a bake folder that was never shipped). The white
+  // look ignores those materials entirely and shows the clean body shape; the
+  // original look hands the asset's own materials back.
+  const LOOK_STORAGE = "flowhmr-look", JOINT_SIZE_STORAGE = "flowhmr-joint-size";
+  const BONE_WIDTH_STORAGE = "flowhmr-bone-width", LOOKS = new Set(["white", "original", "normal"]);
+  const lookSelect = $("optLook"), jointSizeInput = $("optJointSize"), boneWidthInput = $("optBoneWidth");
+  const storedLook = localStorage.getItem(LOOK_STORAGE);
+  let look = LOOKS.has(storedLook) ? storedLook : "white";
+  const clampNumber = (value, min, max, fallback) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+  };
+  let jointSize = clampNumber(localStorage.getItem(JOINT_SIZE_STORAGE), 1, 10, 4);
+  let boneWidth = clampNumber(localStorage.getItem(BONE_WIDTH_STORAGE), 0.4, 2, 1);
+  if (lookSelect) lookSelect.value = look;
+  if (jointSizeInput) jointSizeInput.value = String(jointSize);
+  if (boneWidthInput) boneWidthInput.value = String(boneWidth);
+  const whiteLook = new THREE.MeshStandardMaterial({ color: 0xf4f4f4, roughness: 0.9, metalness: 0.0 });
+  const normalLook = new THREE.MeshNormalMaterial();
+  let lookDirty = false;
+
+  // ------------------------------------------------------------ cel outline
+  // Inverted-hull outline for MMD characters: the same skinned geometry drawn
+  // back faces only, pushed out along the skinned normal. One extra draw call
+  // per material group, no render target and no post pass, so it stays cheap.
+  const OUTLINE_STORAGE = "flowhmr-outline";
+  // World-space thickness in metres. At a typical 2.5 m framing this lands on
+  // roughly 2–3 screen pixels, which is what makes the line read at all.
+  const OUTLINE_THICKNESS = 0.0082;
+  const outlineToggle = $("optOutline");
+  let showOutline = localStorage.getItem(OUTLINE_STORAGE) !== "off";
+  if (outlineToggle) outlineToggle.checked = showOutline;
+  const outlineMaterial = new THREE.MeshPhongMaterial({
+    color: 0x000000, emissive: 0x0c1018, specular: 0x000000, shininess: 0, side: THREE.BackSide,
+  });
+  // Placeholder for groups that must not be outlined: three skips invisible
+  // materials, so the group costs nothing but keeps the material array aligned
+  // with geometry.groups.
+  const hiddenOutlineMaterial = new THREE.MeshBasicMaterial({ visible: false });
+  /** Solid, opaque, single-sided surfaces only. Anything drawn from both sides
+   *  or from the back is a sheet with no thickness, and a hull around it either
+   *  inverts into itself or pokes through. */
+  function outlineable(material) {
+    if (!material || material.visible === false) return false;
+    if (material.transparent) return false;
+    if ((material.alphaTest ?? 0) > 0) return false;
+    if (typeof material.opacity === "number" && material.opacity < 0.999) return false;
+    if (material.side !== undefined && material.side !== THREE.FrontSide) return false;
+    return true;
+  }
+  outlineMaterial.onBeforeCompile = (shader) => {
+    shader.uniforms.outlineThickness = { value: OUTLINE_THICKNESS };
+    shader.vertexShader = "uniform float outlineThickness;\n" + shader.vertexShader.replace(
+      "#include <skinning_vertex>",
+      `#include <skinning_vertex>
+      transformed += normalize( objectNormal ) * outlineThickness;`,
+    );
+  };
+  outlineMaterial.customProgramCacheKey = () => "flowhmr-cel-outline";
+  const celToggle = $("optCel");
+  let showCel = localStorage.getItem(CEL_STORAGE) !== "off";
+  if (celToggle) celToggle.checked = showCel;
+  function syncCelShading() {
+    for (const actor of actors) {
+      const mesh = actor.character?.mesh;
+      if (mesh) setCelShading(mesh, showCel);
+    }
+    invalidate();
+  }
+  celToggle?.addEventListener("change", () => {
+    showCel = celToggle.checked;
+    localStorage.setItem(CEL_STORAGE, showCel ? "on" : "off");
+    syncCelShading();
+  });
+
+  // ---- cloth dock ------------------------------------------------------
+  const clothToggle = $("optCloth");
+  const clothSolveButton = $("clothSolveButton");
+  if (clothToggle) clothToggle.checked = clothEnabled();
+  clothToggle?.addEventListener("change", () => {
+    setClothEnabled(clothToggle.checked);
+    // Turning it off must restore the retargeted pose, not leave the last frame
+    // of cloth baked into the skeleton.
+    for (const actor of actors) drawActorFrame(actor, state.frame);
+    renderer.shadowMap.needsUpdate = true;
+    invalidate();
+  });
+  function syncClothDock() {
+    const ready = actors.some((actor) => actor.character?.mesh?.skeleton);
+    if (clothSolveButton) clothSolveButton.disabled = !ready || !!clothSolving();
+    if (clothToggle) clothToggle.disabled = !ready;
+  }
+  clothSolveButton?.addEventListener("click", async () => {
+    const actor = actors.find((entry) => entry.character?.mesh?.skeleton);
+    if (!actor) return;
+    const from = Math.max(0, Math.round(state.frame));
+    const last = actor.meta.num_frames - 1;
+    await openClothSolve({
+      actor,
+      from,
+      to: last,
+      showFrame: (frame) => {
+        state.frame = frame;
+        for (const entry of actors) drawActorFrame(entry, frame);
+        renderer.render(scene, camera);
+      },
+      confirmStart: true,
+    });
+    syncClothDock();
+    // Redraw the lane from whatever the solve left in the cache.
+    const baked = clothTrack(actor.id);
+    if (baked?.mesh === actor.character?.mesh) renderClothLane(baked.amplitudes ?? [], baked.length);
+    for (const entry of actors) drawActorFrame(entry, state.frame);
+    invalidate();
+  });
+  for (const [id, key] of [["clothElasticity", "stiffness"], ["clothDamping", "damping"], ["clothGravity", "gravity"]]) {
+    const input = $(id);
+    if (!input) continue;
+    input.value = String(clothSettings[key]);
+    input.addEventListener("input", () => {
+      updateClothSettings({ [key]: Number(input.value) });
+      clearClothTrack();
+      for (const actor of actors) {
+        if (actor.character) actor.character.cloth = null;
+        drawActorFrame(actor, state.frame);
+      }
+      invalidate();
+    });
+  }
+  const clothCollideBox = $("clothCollide");
+  if (clothCollideBox) {
+    clothCollideBox.checked = clothSettings.collide !== false;
+    clothCollideBox.addEventListener("change", () => {
+      updateClothSettings({ collide: clothCollideBox.checked });
+      clearClothTrack();
+      for (const actor of actors) {
+        if (actor.character) actor.character.cloth = null;
+        drawActorFrame(actor, state.frame);
+      }
+      invalidate();
+    });
+  }
+
   const state = {
     jobId: null, meta: null, scene: null, bodyVariant: "neutral", frame: 0, playing: false, speed: 1, lastT: 0, acc: 0,
+    dt: 1 / 60,
     prevRoot: new THREE.Vector3(),
   };
   const poseMenu = $("characterPoseMenu");
@@ -304,23 +522,15 @@ export function initViewer(preview) {
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.onclick = () => setView(button.dataset.view);
   });
-  const mouseTools = [...document.querySelectorAll("[data-mouse-mode]")];
-  function setMouseMode(mode) {
-    const pan = mode === "pan";
-    controls.mouseButtons.LEFT = pan ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
-    controls.mouseButtons.MIDDLE = pan ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
-    controls.mouseButtons.RIGHT = pan ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
-    for (const button of mouseTools) button.setAttribute("aria-pressed", String(button.dataset.mouseMode === mode));
-    setText($("viewControlHint"), m(pan ? "view.pan_status" : "view.rotate_status"));
-  }
-  for (const tool of mouseTools) {
-    tool.onclick = () => {
-      const mode = tool.dataset.mouseMode;
-      setMouseMode(mode);
-      localStorage.setItem(MOUSE_MODE_STORAGE, mode);
-    };
-  }
-  setMouseMode(localStorage.getItem(MOUSE_MODE_STORAGE) === "rotate" ? "rotate" : "pan");
+  // ------------------------------------------------------------ view navigation
+  // Left button keeps its original job (drag to pan) — UE spends it on selection,
+  // which this viewport has nothing to select with. UE's right-drag orbit is
+  // adopted because it is strictly better than a mode switch: rotating and
+  // panning are always live at once instead of being mutually exclusive.
+  controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
+  controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+  controls.mouseButtons.RIGHT = THREE.MOUSE.ROTATE;
+  controls.screenSpacePanning = true;
   $("toggleGrid").onclick = (event) => {
     floor.visible = axisLines.visible = !floor.visible;
     shadowPlane.visible = floor.visible && (!actors.length || actors.some(({ body, character }) => (character?.mesh ?? body).visible));
@@ -338,27 +548,138 @@ export function initViewer(preview) {
     });
   }
 
-  wireToggle.onclick = (event) => {
-    bodyMat.wireframe = !bodyMat.wireframe;
+  // Keep the asset's own materials aside so the look can be swapped at any time.
+  function lookBaseMaterial(mesh) {
+    if (!mesh.userData.lookBase) mesh.userData.lookBase = mesh.material;
+    return mesh.userData.lookBase;
+  }
+  function applyLookMaterial(mesh, material) {
+    if (!mesh) return;
+    const base = lookBaseMaterial(mesh);
+    if (material) mesh.material = Array.isArray(base) ? base.map(() => material) : material;
+    else if (mesh.material !== base) mesh.material = base;
+  }
+  function actorLookMaterial(actor) {
+    if (look === "normal") return normalLook;
+    if (look !== "white") return null;
+    if (!actor.whiteLook) {
+      actor.whiteLook = whiteLook.clone();
+      actor.whiteLook.color.lerp(new THREE.Color(personColor(Math.max(0, (actor.number ?? 1) - 1))), 0.12);
+    }
+    return actor.whiteLook;
+  }
+  function applyLook() {
+    whiteLook.wireframe = normalLook.wireframe = bodyMat.wireframe;
+    for (const actor of actors) {
+      const material = actorLookMaterial(actor);
+      applyLookMaterial(actor.body, material);
+      const root = actor.character?.mesh;
+      if (root) {
+        root.traverse((node) => { if (node.isMesh) applyLookMaterial(node, material); });
+        // Newly attached characters start with whatever 三渲二 is set to.
+        if (actor.character.asset?.kind === "pmx") setCelShading(root, showCel);
+      }
+    }
+  }
+
+  function clearOutlines(actor) {
+    for (const node of actor.outlines ?? []) node.removeFromParent();
+    actor.outlines = [];
+  }
+  // Vertex-shell outline: a copy of the mesh pushed along its normals and drawn
+  // back-face only. A screen-space pass was tried and dropped — it cannot tell a
+  // cloth fold from a stack of hair cards, so it drew every layer.
+  function syncCharacterOutline(actor) {
+    const root = actor.character?.mesh;
+    const wanted = showOutline && actor.character?.asset?.kind === "pmx" && root?.visible;
+    clearOutlines(actor);
+    if (!wanted) return;
+    root.updateMatrixWorld(true);
+    root.traverse((node) => {
+      if (!node.isSkinnedMesh || !node.skeleton) return;
+      const source = Array.isArray(node.material) ? node.material : [node.material];
+      const materials = source.map((material) => (outlineable(material) ? outlineMaterial : hiddenOutlineMaterial));
+      if (materials.every((material) => material === hiddenOutlineMaterial)) return;
+      const outline = new THREE.SkinnedMesh(node.geometry, source.length === 1 ? materials[0] : materials);
+      outline.name = "character-outline";
+      outline.bindMode = node.bindMode;
+      outline.bind(node.skeleton, node.bindMatrix);
+      outline.matrixAutoUpdate = false;
+      outline.matrix.copy(node.matrix);
+      outline.frustumCulled = false;
+      outline.castShadow = false;
+      outline.receiveShadow = false;
+      node.parent.add(outline);
+      actor.outlines.push(outline);
+    });
+  }
+
+  // ---------------------------------------------------------------- display
+  // One control decides what the viewport shows: Original / White / Normal /
+  // Wire / Skeleton. The old split (a solid-wire-skeleton switch plus a separate
+  // material dropdown) could be combined into states that meant nothing, such as
+  // "wireframe with original materials". The hidden <select> stays as the state
+  // holder so the rest of the look pipeline is unchanged.
+  const displayMenu = $("displayMenu");
+  const displayValue = $("displayValue");
+  const displayButtons = displayMenu ? [...displayMenu.querySelectorAll("[data-display]")] : [];
+  function currentDisplay() {
+    if (!showSkin) return "skeleton";
+    if (bodyMat.wireframe) return "wire";
+    return look;
+  }
+  function syncDisplayMenu() {
+    const mode = currentDisplay();
+    const ready = actors.some((a) => a.skeleton);
+    if (displayValue) setText(displayValue, m(`view.display_${mode}`));
+    for (const button of displayButtons) {
+      button.setAttribute("aria-pressed", String(button.dataset.display === mode));
+      button.disabled = button.dataset.display === "skeleton" && !ready;
+    }
+  }
+  function setDisplay(mode) {
+    const skin = mode !== "skeleton";
+    if (showSkin !== skin) {
+      showSkin = skin;
+      localStorage.setItem("flowhmr-skin", skin ? "on" : "off");
+    }
+    bodyMat.wireframe = mode === "wire";
     bodyMat.needsUpdate = true;
+    const nextLook = ["original", "white", "normal"].includes(mode) ? mode : look;
+    if (nextLook !== look) {
+      look = nextLook;
+      localStorage.setItem(LOOK_STORAGE, look);
+      if (lookSelect) lookSelect.value = look;
+    }
     for (const { body, character } of actors) {
       body.material.wireframe = bodyMat.wireframe;
       body.material.needsUpdate = true;
       syncCharacterWire(character?.mesh);
     }
-    event.currentTarget.setAttribute("aria-pressed", String(bodyMat.wireframe));
-    setText($("viewportMode"), m(bodyMat.wireframe ? "view.wire_preview" : "view.solid"));
+    applyLook();
+    syncSkeletonDisplay();
     renderer.shadowMap.needsUpdate = true;
     invalidate();
-  };
+  }
+  for (const button of displayButtons) {
+    button.addEventListener("click", () => {
+      setDisplay(button.dataset.display);
+      displayMenu.open = false;
+    });
+  }
+  wireToggle.onclick = () => setDisplay(bodyMat.wireframe ? look : "wire");
 
   function removeActors() {
     character.releaseActors(actors);
     for (const actor of actors) {
       removeSkeleton(actor);
+      clearOutlines(actor);
       scene.remove(actor.group);
       actor.body.geometry.dispose();
-      if (actor.body.material !== bodyMat) actor.body.material.dispose();
+      // The look material may be on screen; the owned material is the base one.
+      const base = actor.body.userData.lookBase ?? actor.body.material;
+      if (base !== bodyMat) base.dispose();
+      actor.whiteLook?.dispose();
     }
     actors = [];
     show("previewCharacter", false);
@@ -445,9 +766,13 @@ export function initViewer(preview) {
     const { skeleton } = actor;
     if (!skeleton?.group.visible) return;
     const { points, lines, cones, stride, joints, edges, parents } = skeleton;
-    if (poseMenu.open && actor.character) {
+    // With a custom character applied, the 52 SMPL joints are read from the
+    // character's own bones (rig.sourceToTarget), so the overlay sits on the
+    // retargeted body instead of on the raw capture. Only the bare SMPL-H body
+    // falls back to the per-frame joint stream.
+    if (actor.character) {
       const { asset, mesh, rig } = actor.character;
-      const bones = asset.kind === "pmx" ? mesh.skeleton.bones : asset.getRig(mesh).bones;
+      const bones = asset.kind === "fbx" ? asset.getRig(mesh).bones : mesh.skeleton.bones;
       actor.group.updateWorldMatrix(true, false);
       mesh.updateMatrixWorld(true);
       inverseActor.copy(actor.group.matrixWorld).invert();
@@ -456,7 +781,23 @@ export function initViewer(preview) {
         if (bone) boneHead.setFromMatrixPosition(bone.matrixWorld).applyMatrix4(inverseActor).toArray(points.array, j * 3);
         else if (parents[j] >= 0) points.array.copyWithin(j * 3, parents[j] * 3, parents[j] * 3 + 3);
       }
-    } else points.array.set(joints.subarray(frame * stride, (frame + 1) * stride));
+    } else {
+      // Bare SMPL body: the joint stream is a flat array of whole frames.
+      const total = stride > 0 ? joints.length / stride : 0;
+      const f0 = Math.floor(frame);
+      const t = frame - f0;
+      const f1 = Math.min(total - 1, f0 + 1);
+      const a = f0 * stride;
+      if (t < 1e-4 || f1 === f0) {
+        points.array.set(joints.subarray(a, a + stride));
+      } else {
+        const b = f1 * stride;
+        for (let i = 0; i < stride; i++) {
+          const va = joints[a + i];
+          points.array[i] = va + (joints[b + i] - va) * t;
+        }
+      }
+    }
     points.needsUpdate = true;
     if (cones.visible) {
       let count = 0;
@@ -465,7 +806,7 @@ export function initViewer(preview) {
         boneDirection.fromArray(points.array, edges[i + 1] * 3).sub(boneHead);
         const length = boneDirection.length();
         if (!Number.isFinite(length) || length < 1e-6) continue;
-        boneScale.setScalar(length);
+        boneScale.set(length * boneWidth, length * boneWidth, length);
         boneRotation.setFromUnitVectors(boneAxis, boneDirection.divideScalar(length));
         cones.setMatrixAt(count++, boneMatrix.compose(boneHead, boneRotation, boneScale));
       }
@@ -490,11 +831,14 @@ export function initViewer(preview) {
     skinToggle.checked = !only;
     skinToggle.disabled = !ready;
     coneToggle.disabled = !visible;
+    jointSizeInput.disabled = !visible;
+    boneWidthInput.disabled = !visible || !coneToggle.checked;
     shadowPlane.visible = floor.visible && !only;
     wireToggle.disabled = only;
-    setText($("viewportMode"), m(only ? "view.skeleton_only" : bodyMat.wireframe ? "view.wire_preview" : "view.solid"));
+    syncDisplayMenu();
     setAttr($("skeletonOverlayLabel"), "title", m(character.active
       ? poseMenu.open ? "pose.target_overlay" : "character.skeleton" : "view.skeleton_hint"));
+    applyLook();
     for (const actor of actors) {
       const mesh = actor.character?.mesh;
       actor.body.visible = !mesh && (!only || !actor.skeleton);
@@ -502,11 +846,13 @@ export function initViewer(preview) {
         mesh.visible = !only || !actor.skeleton;
         syncCharacterWire(mesh);
       }
+      syncCharacterOutline(actor);
       if (actor.skeleton) {
         const { group, bones, cones, jointMarkers } = actor.skeleton;
         group.visible = visible;
         bones.visible = !coneToggle.checked;
         jointMarkers.visible = !coneToggle.checked;
+        jointMarkers.material.size = jointSize;
         cones.visible = coneToggle.checked;
         cones.material.depthTest = cones.material.depthWrite = only;
       }
@@ -559,6 +905,77 @@ export function initViewer(preview) {
     localStorage.setItem("flowhmr-skin", showSkin ? "on" : "off");
     syncSkeletonDisplay();
   });
+  lookSelect.addEventListener("change", () => {
+    look = LOOKS.has(lookSelect.value) ? lookSelect.value : "white";
+    localStorage.setItem(LOOK_STORAGE, look);
+    syncLookChip();
+    syncDisplayMenu();
+    applyLook();
+    for (const actor of actors) drawActorFrame(actor, state.frame);
+    renderer.shadowMap.needsUpdate = true;
+    invalidate();
+  });
+  jointSizeInput.addEventListener("input", () => {
+    jointSize = clampNumber(jointSizeInput.value, 1, 10, 4);
+    localStorage.setItem(JOINT_SIZE_STORAGE, String(jointSize));
+    for (const actor of actors) if (actor.skeleton) actor.skeleton.jointMarkers.material.size = jointSize;
+    invalidate();
+  });
+  boneWidthInput.addEventListener("input", () => {
+    boneWidth = clampNumber(boneWidthInput.value, 0.4, 2, 1);
+    localStorage.setItem(BONE_WIDTH_STORAGE, String(boneWidth));
+    for (const actor of actors) if (actor.skeleton?.cones.visible) drawActorFrame(actor, state.frame);
+    invalidate();
+  });
+  outlineToggle?.addEventListener("change", () => {
+    showOutline = outlineToggle.checked;
+    localStorage.setItem(OUTLINE_STORAGE, showOutline ? "on" : "off");
+    for (const actor of actors) syncCharacterOutline(actor);
+    renderer.shadowMap.needsUpdate = true;
+    invalidate();
+  });
+
+  // Loading bar for the viewport. The load runs in stages (read the binary
+  // meshes, then build rigs and skeletons) and each stage is a wide parallel
+  // fetch, so the bar slides instead of pretending to know a percentage.
+  const loadingBox = $("viewerLoading"), loadingText = $("viewerLoadingText");
+  let loadingStage = 0;
+  function showLoading(message) {
+    if (!loadingBox) return;
+    loadingStage += 1;
+    loadingBox.classList.remove("hidden", "done");
+    if (message) setText(loadingText, message);
+    invalidate();
+  }
+  function finishLoading() {
+    if (!loadingBox) return;
+    loadingBox.classList.add("done");
+    setTimeout(() => {
+      if (loadingStage) loadingBox.classList.add("hidden");
+    }, 220);
+    invalidate();
+  }
+
+  // ---------------------------------------------------------- tool chips
+  // Three compact chips instead of eleven flat controls: the look chip also
+  // shows the active look, and opening one group closes the others.
+  const lookChipValue = $("vtLookValue");
+  function syncLookChip() {
+    if (lookChipValue) setText(lookChipValue, m(`view.look_${look}`));
+  }
+  syncLookChip();
+  const toolGroups = [...document.querySelectorAll("#viewerTools details.vt-group")];
+  for (const group of toolGroups) {
+    group.addEventListener("toggle", () => {
+      if (!group.open) return;
+      for (const other of toolGroups) if (other !== group) other.open = false;
+    });
+  }
+  document.addEventListener("pointerdown", (event) => {
+    // A click outside the chips closes whichever group is open.
+    if (event.target.closest?.(".vt-group")) return;
+    for (const group of toolGroups) group.open = false;
+  });
 
   const sourceStart = (meta) => meta.track_start ?? 0;
   const actorFrame = (actor, frame) => sourceStart(state.meta) + frame - sourceStart(actor.meta);
@@ -580,22 +997,63 @@ export function initViewer(preview) {
     return root.divideScalar(Math.max(1, actors.length));
   }
 
+  // Cloth runs after the retarget pass: the body solve owns the mapped bones, and
+  // the cloth solver only rewrites the bones it classified. When a baked track
+  // exists for this actor it is read instead of simulated, which is what makes
+  // scrubbing and looping free.
+  function applyCloth(actor, frame) {
+    const character = actor.character;
+    if (!character || !clothEnabled()) return;
+    if (!character.cloth) {
+      if (!character.mesh?.skeleton?.bones?.length) return;
+      character.cloth = createClothDynamics({
+        mesh: character.mesh, rig: character.rig, options: clothSettings,
+      });
+      if (!character.cloth.info.bones) { character.cloth = null; return; }
+    }
+    const track = clothTrack(actor.id);
+    // A track belongs to one mesh; after a character swap its bones are stale.
+    if (track && track.mesh === character.mesh && applyClothFrame(track, frame)) return;
+    character.cloth.step(frame, state.dt || 1 / 60);
+  }
+
   function drawActorFrame(actor, globalFrame) {
     const { body, group, meta, verts } = actor;
     const f = actorFrame(actor, globalFrame);
     group.visible = globalFrame >= 0 && f >= 0 && f < meta.num_frames;
     if (!group.visible) return;
     if (actor.character) {
-      if (actor.character.mesh.visible || (poseMenu.open && actor.skeleton?.group.visible)) actor.character.rig.apply(f);
+      // The rig has to be posed whenever the overlay reads it, not only when the
+      // skin is on screen. "Skeleton" display mode hides the mesh but takes its
+      // joint positions from that same rig, so gating on mesh.visible froze the
+      // skeleton in place.
+      if (actor.character.mesh.visible || actor.skeleton?.group.visible) {
+        actor.character.rig.apply(f);
+        applyCloth(actor, f);
+      }
       drawSkeletonFrame(actor, f);
       return;
     }
     drawSkeletonFrame(actor, f);
     if (!body.visible) return;
+    // Vertex frames are half-float snapshots, so a fractional frame blends the
+    // two neighbours. Without this the body can only ever sit on whole frames
+    // while the rig around it interpolates — the two would drift apart.
     const pos = body.geometry.attributes.position;
     const n = pos.array.length;
-    const offset = f * n;
-    for (let i = 0; i < n; i++) pos.array[i] = fromHalf[verts[offset + i]];
+    const f0 = Math.floor(f);
+    const t = f - f0;
+    const f1 = Math.min(meta.num_frames - 1, f0 + 1);
+    if (t < 1e-4 || f1 === f0) {
+      const offset = f0 * n;
+      for (let i = 0; i < n; i++) pos.array[i] = fromHalf[verts[offset + i]];
+    } else {
+      const o0 = f0 * n, o1 = f1 * n;
+      for (let i = 0; i < n; i++) {
+        const a = fromHalf[verts[o0 + i]];
+        pos.array[i] = a + (fromHalf[verts[o1 + i]] - a) * t;
+      }
+    }
     pos.needsUpdate = true;
     body.geometry.computeVertexNormals();
   }
@@ -620,9 +1078,15 @@ export function initViewer(preview) {
     state.frame = f;
     for (const actor of actors) drawActorFrame(actor, f);
     updateFrameRoot(f);
-    scrub.value = f;
-    const displayFrame = (state.scene ? sourceStart(m) : 0) + f + 1;
-    $("frameLabel").textContent = `${displayFrame} / ${(state.scene ? sourceStart(m) : 0) + m.num_frames}`;
+    scrub.value = Math.round(f);
+    // Frame numbers are shown on the timeline's own fps, like a DCC timeline:
+    // the clip is still 30 fps of samples, so switching to 60 fps doubles the
+    // numbers without changing the motion. `f` itself stays in source frames.
+    const fps = displayFps();
+    const offset = state.scene ? sourceStart(m) : 0;
+    const displayFrame = Math.floor((offset + f) / m.fps * fps) + 1;
+    const totalFrames = Math.round((offset + m.num_frames) / m.fps * fps);
+    $("frameLabel").textContent = `${displayFrame} / ${totalFrames}`;
     $("playhead").textContent = displayFrame;
     const position = f / Math.max(1, m.num_frames - 1);
     $("timelineTrack").style.setProperty("--playhead", `calc(${position * 100}% + ${12 - 24 * position}px)`);
@@ -631,6 +1095,25 @@ export function initViewer(preview) {
   }
 
   const frameButtons = [...document.querySelectorAll("[data-frame-action]")];
+  // ------------------------------------------------ timeline fps (display only)
+  // The clip's sample rate never changes; this only decides what number the
+  // timeline prints and how finely the scrubber is labelled.
+  const DISPLAY_FPS_STORAGE = "flowhmr-timeline-fps";
+  const fpsSelect = $("timelineFps");
+  function displayFps() {
+    const value = Number(fpsSelect?.value);
+    return Number.isFinite(value) && value > 0 ? value : 30;
+  }
+  if (fpsSelect) {
+    const stored = Number(localStorage.getItem(DISPLAY_FPS_STORAGE));
+    if ([24, 25, 30, 48, 50, 60, 120].includes(stored)) fpsSelect.value = String(stored);
+    fpsSelect.addEventListener("change", () => {
+      localStorage.setItem(DISPLAY_FPS_STORAGE, fpsSelect.value);
+      if (state.meta) setFrame(state.frame);
+      else setTimeline(0);
+    });
+  }
+
   function setTimeline(frameCount) {
     const ready = frameCount > 0;
     scrub.max = Math.max(0, frameCount - 1);
@@ -639,7 +1122,11 @@ export function initViewer(preview) {
     for (const button of frameButtons) button.disabled = !ready;
     $("timelineTrack").classList.toggle("has-motion", ready);
     const start = ready && state.scene ? sourceStart(state.meta) + 1 : 1;
-    $("timelineRange").textContent = ready ? `${start}–${start + frameCount - 1} · ${state.meta.fps} FPS` : "30 FPS";
+    // The range readout moved into the fps control's tooltip; the control itself
+    // now carries the same "start–end · fps" summary.
+    const rangeText = ready ? `${start}–${start + frameCount - 1} · ${state.meta.fps} FPS` : m("timeline.no_motion");
+    setAttr($("timelineFps"), "title", rangeText);
+    $("timelineFps").disabled = !ready;
     const tickCount = Math.min(5, frameCount);
     const ticks = Array.from({ length: tickCount }, (_, i) => {
       const tick = document.createElement("span");
@@ -824,7 +1311,28 @@ export function initViewer(preview) {
     if (e.code === "Numpad3") { e.preventDefault(); setView(e.ctrlKey ? "left" : "right"); }
     if (e.code === "Numpad7") { e.preventDefault(); setView(e.ctrlKey ? "bottom" : "top"); }
     if (e.code === "Numpad5") { e.preventDefault(); toggleProjection(); }
-    if (e.code === "Home") { e.preventDefault(); resetView(); }
+    if (e.code === "Home" || e.code === "KeyF") { e.preventDefault(); resetView(); }
+    // Display keys follow the order of the 显示 menu.
+    if (e.code === "Digit1") { e.preventDefault(); setDisplay("original"); }
+    if (e.code === "Digit2") { e.preventDefault(); setDisplay("white"); }
+    if (e.code === "Digit3") { e.preventDefault(); setDisplay("normal"); }
+    if (e.code === "Digit4") { e.preventDefault(); setDisplay("wire"); }
+    if (e.code === "Digit5") { e.preventDefault(); setDisplay("skeleton"); }
+    if (e.code === "KeyS") {
+      e.preventDefault();
+      skeletonToggle.checked = !skeletonToggle.checked;
+      skeletonToggle.dispatchEvent(new Event("change"));
+    }
+    if (e.code === "KeyO") {
+      e.preventDefault();
+      outlineToggle.checked = !outlineToggle.checked;
+      outlineToggle.dispatchEvent(new Event("change"));
+    }
+    if (e.code === "KeyC" && celToggle) {
+      e.preventDefault();
+      celToggle.checked = !celToggle.checked;
+      celToggle.dispatchEvent(new Event("change"));
+    }
     if (!state.meta) return;
     if (e.code === "ArrowRight") { e.preventDefault(); jumpTo(state.frame + 1); }
     if (e.code === "ArrowLeft") { e.preventDefault(); jumpTo(state.frame - 1); }
@@ -862,33 +1370,38 @@ export function initViewer(preview) {
   function tick(t) {
     renderRequest = 0;
     const dt = state.lastT ? (t - state.lastT) / 1000 : 0;
+    state.dt = dt > 0 && dt < 0.5 ? dt : 1 / 60;
     state.lastT = t;
     if (state.playing && state.meta) {
       if (mediaEnabled() && !media.fallback) tickMedia(t);
       else {
-        state.acc += dt * state.meta.fps * state.speed;
-        if (state.acc >= 1) {
-          const steps = Math.floor(state.acc);
-          state.acc -= steps;
-          let next = state.frame + steps;
-          if (next >= state.meta.num_frames) {
-            next = 0;
-            if ($("optFollow").checked) recenterOnFrame(0);
-          }
-          setFrame(next);
+        // Advance a fractional frame instead of stepping whole ones: a 30 fps
+        // clip on a 60 Hz display then reposes the rig on every paint and the
+        // rig's own blend fills the gap, which is what removes the stepping.
+        let next = state.frame + dt * state.meta.fps * state.speed;
+        if (next >= state.meta.num_frames) {
+          next = 0;
+          if ($("optFollow").checked) recenterOnFrame(0);
         }
+        setFrame(next);
       }
     }
     const zooming = applyZoom();
     const orbiting = controls.update();
-    if (dirty) {
+    // Paint whenever the scene changed, at most once per rAF tick: the browser
+    // already synchronises rAF to the display, so an extra cap only quantises
+    // the rate on panels whose refresh is not a multiple of it.
+    if (dirty && t - lastPaint >= MIN_PAINT_MS) {
       dirty = false;
+      lastPaint = t;
       const d = camera.position.distanceTo(controls.target);
       scene.fog.near = d + 6;
       scene.fog.far = d + 30;
+      const started = performance.now();
       renderer.render(scene, camera);
+      samplePaint(t, performance.now() - started);
     }
-    if (state.playing || zooming || orbiting) {
+    if (state.playing || zooming || orbiting || dirty) {
       if (!renderRequest) renderRequest = requestAnimationFrame(tick);
     } else state.lastT = 0;
   }
@@ -901,7 +1414,7 @@ export function initViewer(preview) {
       t("view.scene"),
       [state.scene ? t("person.count", { count: actors.length }) : "",
         ...(custom > 1 ? [t("character.custom_count", { count: custom })]
-          : asset ? [({ mixamo: "Mixamo", metahuman: "MetaHuman", vrm: "VRM" })[asset.profile] ?? "PMX", asset.name]
+          : asset ? [({ mixamo: "Mixamo", metahuman: "MetaHuman" })[asset.profile] ?? "PMX", asset.name]
             : ["SMPL-H", t(`view.${state.bodyVariant}`)])].filter(Boolean).join(" · "),
     ].join(" | "));
   }
@@ -986,77 +1499,12 @@ export function initViewer(preview) {
   });
 
   return {
-    controlPlayback(command) {
-      if (!state.meta || state.frame < 0) return { error: 'No motion is loaded in this viewer.' };
-      if (state.jobId !== command.job_id) return { error: 'The viewer is displaying a different job.' };
-      if (command.action === 'seek') {
-        if (!Number.isInteger(command.frame) || command.frame < 0 || command.frame >= state.meta.num_frames)
-          return { error: 'Frame is outside the loaded motion.' };
-        jumpTo(command.frame);
-      } else if (command.action === 'play') {
-        if (!state.playing) {
-          resetMediaSync();
-          if (state.frame >= state.meta.num_frames - 1) setFrame(0);
-          setPlaying(true);
-        }
-      } else if (command.action === 'pause') setPlaying(false);
-      else return { error: 'Unknown playback action.' };
-      return { job_id: state.jobId, action: command.action, frame: state.frame,
-        display_frame: (state.scene ? sourceStart(state.meta) : 0) + state.frame + 1,
-        source_frame: sourceStart(state.meta) + state.frame, frame_count: state.meta.num_frames,
-        fps: state.meta.fps, playing: state.playing };
-    },
-    snapshot() {
-      if (!state.meta || state.frame < 0) return { available: false, reason: 'no_motion_loaded' };
-      return {
-        available: true, job_id: state.jobId, frame: state.frame,
-        display_frame: (state.scene ? sourceStart(state.meta) : 0) + state.frame + 1,
-        source_frame: sourceStart(state.meta) + state.frame,
-        fps: state.meta.fps, playing: state.playing, frame_count: state.meta.num_frames,
-        actors: actors.map((actor) => {
-          const frame = actorFrame(actor, state.frame);
-          const active = frame >= 0 && frame < actor.meta.num_frames;
-          const source = actor.skeleton && active ? {
-            index_space: 'SMPL-H source joint order',
-            joints: actor.skeleton.parents.map((parent, index) => ({ index, parent,
-              position: Array.from(actor.skeleton.joints.subarray(frame * actor.skeleton.stride + index * 3,
-                frame * actor.skeleton.stride + index * 3 + 3)) })),
-            coordinate_space: 'actor local', units: 'metres',
-          } : null;
-          let target = null;
-          if (actor.character && active) {
-            const { asset, mesh, rig } = actor.character;
-            // A hidden character is not normally advanced during rendering.
-            if (!mesh.visible && !(poseMenu.open && actor.skeleton?.group.visible)) rig.apply(frame);
-            const bones = asset.kind === 'pmx' ? mesh.skeleton.bones : asset.getRig(mesh).bones;
-            actor.group.updateWorldMatrix(true, true);
-            target = { kind: asset.kind, character_id: actor.character.libraryId, visible: mesh.visible,
-              index_space: asset.kind === 'pmx' ? 'PMX skeleton bone order' :
-                asset.kind === 'fbx' ? 'FBX preview rig bone order (skin order followed by ancestors)' :
-                  'VRM preview rig order (not original glTF node indices)',
-              local_transform: 'relative to actual scene parent', world_transform: 'Three.js scene world',
-              quaternion_order: 'xyzw', translation_units: 'metres in scene world',
-              bones: bones.map((bone, index) => {
-                const worldPosition = new THREE.Vector3(), worldQuaternion = new THREE.Quaternion();
-                bone.getWorldPosition(worldPosition); bone.getWorldQuaternion(worldQuaternion);
-                const parentIndex = bones.indexOf(bone.parent);
-                return { index, name: bone.name, parent_index: parentIndex < 0 ? null : parentIndex,
-                  parent_name: bone.parent?.name ?? null, local_position: bone.position.toArray(),
-                  local_quaternion: bone.quaternion.toArray(), local_scale: bone.scale.toArray(),
-                  world_position: worldPosition.toArray(), world_quaternion: worldQuaternion.toArray() };
-              }) };
-          }
-          return { actor_id: actor.id, person_id: actor.number ?? null, active,
-            frame: active ? frame : null, source_skeleton: source, character_skeleton: target };
-        }),
-      };
-    },
     openCharacter: character.open,
     getPmxActors(people) {
       const selected = new Set(people.map(String));
       const targets = actors.filter((actor) => !state.scene || selected.has(String(actor.number)));
       if ((state.scene && targets.length !== selected.size) ||
-          targets.some((actor) => actor.character?.asset.kind !== "pmx")) return [];
+          targets.some((actor) => !actor.character || actor.character.asset.kind === "fbx")) return [];
       return targets.map((actor) => ({
         person: actor.number,
         start: state.scene ? sourceStart(actor.meta) : 0,
@@ -1099,6 +1547,7 @@ export function initViewer(preview) {
       const inspections = members.map((p) => api.getInspection(p.id, load.signal).catch(() => null));
       let variant = bodySelect.value || "source";
       let data;
+      showLoading(m("view.loading_mesh"));
       try {
         data = await Promise.all(members.map((p) => loadActor(p, variant, load.signal))).catch((error) => {
           if (load.signal.aborted || variant === "source") throw error;
@@ -1110,15 +1559,18 @@ export function initViewer(preview) {
         load.abort();
         loadController = null;
         bodySelect.disabled = false;
+        finishLoading();
         throw error;
       }
       if (load.signal.aborted) return null;
       removeActors();
+      showLoading(m("view.loading_rig"));
       actors = data.map((entry) => addActor(entry, !!groupScene));
       const meta = groupScene ? { ...groupScene, ...groupBounds() } : actors[0].meta;
       state.jobId = jobId;
       state.meta = meta;
       state.scene = groupScene;
+      clearClothLane();
       state.frame = -1;
       state.acc = 0;
       state.lastT = 0;
@@ -1148,6 +1600,7 @@ export function initViewer(preview) {
       frameDefaultView();
       setPlaying(false);
       void character.showForJob();
+      finishLoading();
       void Promise.all(inspections).then((results) => {
         if (!load.signal.aborted && state.jobId === jobId) results.forEach((info, i) => setInspection(actors[i], info));
         if (loadController === load) loadController = null;

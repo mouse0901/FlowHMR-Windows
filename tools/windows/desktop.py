@@ -116,13 +116,34 @@ class DesktopBackend:
 def status_page(state):
     language = read_language()
     heading, detail = MESSAGES[language][state]
+    # Shown before the Flask app answers. Same look as the in-app boot splash:
+    # wordmark, sliding bar, then the state text. A failure stops the bar and
+    # turns it red instead of pretending to keep loading.
     return f"""<!doctype html><html lang="{language}"><meta charset="utf-8">
 <style>
-body {{margin:0;display:grid;place-items:center;min-height:100vh;background:#252525;color:#ededed;
-       font:14px 'Segoe UI','Microsoft YaHei',sans-serif}}
-main {{width:min(480px,85%);padding:24px;background:#303030;border:1px solid #454545;border-radius:5px}}
-h1 {{font-size:18px;margin:0 0 12px}} p {{margin:0;color:#bbb;line-height:1.6}}
-</style><main><h1>{escape(heading)}</h1><p>{escape(detail)}</p></main></html>"""
+* {{ box-sizing: border-box }}
+body {{ margin:0; display:grid; place-items:center; min-height:100vh; background:#1b1b1f; color:#e8e8ee;
+       font:14px 'Segoe UI','Microsoft YaHei',sans-serif }}
+main {{ display:grid; justify-items:center; gap:14px; width:min(320px,70vw); text-align:center }}
+.name {{ font-weight:600; font-size:20px; letter-spacing:.08em }}
+.bar {{ position:relative; overflow:hidden; width:100%; height:4px; border-radius:999px;
+       background:rgba(255,255,255,.12) }}
+.bar > i {{ position:absolute; inset:0 auto 0 0; width:38%; border-radius:inherit;
+           background:linear-gradient(90deg,transparent,#7aa2ff,transparent);
+           animation:flow 1.05s ease-in-out infinite }}
+@keyframes flow {{ 0% {{ transform:translateX(-110%) }} 100% {{ transform:translateX(320%) }} }}
+h1 {{ margin:0; font-size:13px; font-weight:600; color:#cfd2dc }}
+p {{ margin:0; font-size:12px; color:#9a9aa6; line-height:1.6 }}
+main.failed h1 {{ color:#f08a8a }}
+main.failed .bar > i {{ width:100%; opacity:.55; animation:none;
+                       background:linear-gradient(90deg,transparent,#f08a8a,transparent) }}
+</style>
+<main class="{escape(state)}">
+  <div class="name">FlowHMR</div>
+  <div class="bar"><i></i></div>
+  <h1>{escape(heading)}</h1>
+  <p>{escape(detail)}</p>
+</main></html>"""
 
 
 def open_models_folder():

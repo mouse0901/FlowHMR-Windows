@@ -7,8 +7,7 @@ const PROPERTY_BYTES = 9;
 const IK_BYTES = 21;
 const VMD_SIGNATURE = new TextEncoder().encode("Vocaloid Motion Data 0002");
 const LINEAR = new Uint8Array(64);
-// Diagonal curves in both row layouts, with the default MMD physics flag at bytes 2 and 3.
-const channels = new Uint8Array(16).fill(127, 8);
+const channels = Uint8Array.of(...Array(8).fill(20), ...Array(8).fill(107));
 for (let i = 0; i < 4; i++) LINEAR.set(channels.subarray(i), 16 * i);
 
 export class PmxVmdExportError extends Error {
@@ -129,6 +128,30 @@ function validateBinding(vmd, rest) {
   return { tracks, iks, hasRoot: used.has(vmd.rootBoneIndex) };
 }
 
+/**
+ * Encode cloth bone names for the VMD, dropping what a player cannot bind:
+ * a name that does not fit the 15-byte field, or one that is ambiguous in this
+ * model, would silently retarget the wrong bone on import.
+ */
+function buildClothTracks(cloth, rest) {
+  if (!cloth?.names?.length || !cloth.data) return [];
+  const counts = new Map();
+  for (const bone of rest?.bones ?? []) {
+    if (bone?.name) counts.set(bone.name, (counts.get(bone.name) ?? 0) + 1);
+  }
+  const out = [];
+  cloth.names.forEach((name, slot) => {
+    if (!name || counts.get(name) !== 1) return;
+    if (!canWriteVmdBoneName(name)) return;
+    try {
+      out.push({ bytes: nameBytes(name, BONE_NAME_BYTES, "bone"), slot });
+    } catch {
+      /* name too long for the field */
+    }
+  });
+  return out;
+}
+
 function timeline(frameCount, fps, startFrame, sceneEndFrame) {
   const valid = (frame) => Number.isSafeInteger(frame) && frame >= 0 && frame <= UINT32_MAX;
   if (fps !== 30 || !valid(startFrame) || !Number.isSafeInteger(frameCount) || frameCount < 1) {
@@ -175,14 +198,19 @@ function abortIfNeeded(signal) {
 // zero based, with an inclusive end. The solver composes the optional scene placement.
 export async function encodePmxVmd({
   solver, rest, modelName = "", frameCount, fps = 30, startFrame = 0,
-  sceneEndFrame = null, placement = null, onProgress, signal,
+  sceneEndFrame = null, placement = null, onProgress, signal, cloth = null,
 }) {
   abortIfNeeded(signal);
   const display = timeline(frameCount, fps, startFrame, sceneEndFrame);
   const vmd = solver?.vmd;
   const { tracks, iks, hasRoot } = validateBinding(vmd, rest);
   const transform = actorPlacement(placement, hasRoot);
-  const keyCount = frameCount * tracks.length;
+  // Cloth bones ride along as extra keyframe tracks. A name that cannot be
+  // encoded into the 15-byte VMD field, or that is ambiguous in this model, is
+  // dropped rather than emitted as a track no player can bind.
+  const clothTracks = buildClothTracks(cloth, rest);
+  const clothCount = clothTracks.length;
+  const keyCount = frameCount * (tracks.length + clothCount);
   const length = HEADER_BYTES + keyCount * BONE_BYTES + 20 +
     display.size * (PROPERTY_BYTES + iks.length * IK_BYTES);
   if (!Number.isSafeInteger(length) || length > UINT32_MAX) fail("size", "The VMD exceeds the export size limit.");
@@ -201,6 +229,8 @@ export async function encodePmxVmd({
   const qs = new Float32Array(tracks.length * 4);
   const ts = new Float32Array(tracks.length * 3);
   const previous = new Float32Array(qs.length);
+  const clothPrevious = new Float32Array(clothCount * 4);
+  const clothStride = cloth?.stride ?? 0;
   let at = HEADER_BYTES;
   let since = performance.now();
   onProgress?.(0);
@@ -237,6 +267,47 @@ export async function encodePmxVmd({
       view.setFloat32(at + 43, previous[q + 3], true);
       bytes.set(LINEAR, at + 47);
       at += BONE_BYTES;
+    }
+    // Cloth keys: same record layout, zero translation (cloth bones carry no
+    // offset here), with the same left-handed flip and sign continuity fix.
+    if (clothCount) {
+      const local = startFrame + f - (cloth?.from ?? 0);
+      if (local >= 0 && local < (cloth?.length ?? 0)) {
+        for (let c = 0; c < clothCount; c += 1) {
+          const track = clothTracks[c];
+          const base = local * clothStride + track.slot * 4;
+          let qx = cloth.data[base];
+          let qy = cloth.data[base + 1];
+          let qz = cloth.data[base + 2];
+          let qw = cloth.data[base + 3];
+          const norm = Math.hypot(qx, qy, qz, qw);
+          if (!Number.isFinite(norm) || norm < 1e-7) {
+            qx = 0; qy = 0; qz = 0; qw = 1;
+          } else {
+            qx /= norm; qy /= norm; qz /= norm; qw /= norm;
+          }
+          const c4 = c * 4;
+          const dot = qx * clothPrevious[c4] + qy * clothPrevious[c4 + 1] +
+            qz * clothPrevious[c4 + 2] + qw * clothPrevious[c4 + 3];
+          const factor = dot < 0 ? -1 : 1;
+          qx *= factor; qy *= factor; qz *= factor; qw *= factor;
+          clothPrevious[c4] = qx;
+          clothPrevious[c4 + 1] = qy;
+          clothPrevious[c4 + 2] = qz;
+          clothPrevious[c4 + 3] = qw;
+          bytes.set(track.bytes, at);
+          view.setUint32(at + 15, startFrame + f, true);
+          view.setFloat32(at + 19, 0, true);
+          view.setFloat32(at + 23, 0, true);
+          view.setFloat32(at + 27, 0, true);
+          view.setFloat32(at + 31, -qx, true);
+          view.setFloat32(at + 35, -qy, true);
+          view.setFloat32(at + 39, qz, true);
+          view.setFloat32(at + 43, qw, true);
+          bytes.set(LINEAR, at + 47);
+          at += BONE_BYTES;
+        }
+      }
     }
     if (f + 1 < frameCount && performance.now() - since >= 24) {
       onProgress?.((f + 1) / frameCount);

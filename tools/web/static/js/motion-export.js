@@ -11,13 +11,12 @@ export function initMotionExport(getBodyVariant, viewer) {
   const dialog = $("fbxExportDialog"), button = $("dlFbx"), menu = $("menuFbx");
   const format = $("motionExportFormat"), confirm = $("fbxConfirm");
   const skin = $("fbxWithSkin"), pose = $("fbxFirstPose"), peopleField = $("fbxPeople");
-  const template = $("fbxTemplate"), error = $("motionExportError");
-  const clearTemplate = $("fbxTemplateClear"), templateHint = $("fbxTemplateHint");
+  const template = $("metaHumanTemplate"), error = $("motionExportError");
   const vmdTarget = $("vmdTarget"), characterOption = $("vmdTargetCharacter");
   const chooseCharacter = $("vmdChooseCharacter");
+  const useCharacterBox = $("vmdUseCharacter"), characterNote = $("vmdCharacterNote");
   const formats = [...format.options];
   let preferred = localStorage.getItem(FORMAT_STORAGE) || "flowhmr";
-  if (preferred === "mixamo_iclone") preferred = "mixamo";
   let result = null, pending = null, entries = [], multiPeople = [], single = false;
 
   skin.checked = localStorage.getItem(SKIN_STORAGE) === "on";
@@ -32,7 +31,7 @@ export function initMotionExport(getBodyVariant, viewer) {
     const keep = next ? [multiPeople[0] ?? entries[0]?.input.value] : multiPeople;
     for (const { input } of entries) {
       input.type = next ? "radio" : "checkbox";
-      if (next) input.name = "fbx-template-person"; else input.removeAttribute("name");
+      if (next) input.name = "metahuman-person"; else input.removeAttribute("name");
       input.checked = keep.includes(input.value);
     }
     single = next;
@@ -45,37 +44,41 @@ export function initMotionExport(getBodyVariant, viewer) {
     const file = template.files[0];
     return file && /\.fbx$/i.test(file.name) && file.size > 0 && file.size <= TEMPLATE_MAX_MB * 1024 * 1024;
   }
-  const usesTemplate = (profile) => profile === "metahuman" || (profile === "mixamo" && template.files.length > 0);
   function sync() {
     const profile = format.value;
-    const mixamo = profile === "mixamo";
-    const useTemplate = usesTemplate(profile);
-    const showTemplate = mixamo || profile === "metahuman";
-    const singlePerson = useTemplate || profile === "maya_adv";
-    selectMode(singlePerson);
-    show("standardFbxOptions", !useTemplate && (profile === "flowhmr" || mixamo));
-    show("fbxTemplateRow", showTemplate);
-    show(clearTemplate, showTemplate && template.files.length > 0);
-    if (showTemplate) setText($("fbxTemplateLabel"), m(`export.${profile}_template`));
-    show(templateHint, mixamo);
-    if (mixamo) template.setAttribute("aria-describedby", templateHint.id);
-    else template.removeAttribute("aria-describedby");
+    const meta = profile === "metahuman";
+    selectMode(meta);
+    show("standardFbxOptions", profile === "flowhmr" || profile === "mixamo");
+    show("metaHumanTemplateRow", meta);
     show("vmdOptions", profile === "vmd");
+    // Cloth export is parked: the row stays hidden regardless of the format.
+    show("exportClothRow", false);
+    show("exportClothHint", false);
     const roles = targets();
     characterOption.disabled = characterOption.hidden = !roles.length;
     if (roles.length) setText(characterOption, roles.length === 1
       ? m("export.vmd_character", { name: roles[0].asset.name }) : m("export.vmd_characters"));
     else vmdTarget.value = "generic";
-    let hint = profile;
-    if (profile === "vmd") hint = vmdTarget.value === "target" ? "vmd_target" : "vmd_generic";
-    if (mixamo) hint = useTemplate ? "mixamo_target" : "";
-    setText($("motionExportHint"), hint ? m(`export.${hint}_hint`) : "");
-    setText($("exportPeopleLabel"), m(singlePerson ? "export.select_person" : "export.select_people"));
+    // The checkbox is the visible control; the select stays as the state holder
+    // so every other code path keeps reading vmdTarget.value.
+    const useCharacter = !!roles.length && vmdTarget.value === "target";
+    if (useCharacterBox) {
+      useCharacterBox.checked = useCharacter;
+      // `busy` is declared below this point; read the flag directly to avoid a
+      // temporal-dead-zone error on the first sync.
+      useCharacterBox.disabled = !!pending || !roles.length;
+    }
+    if (characterNote) {
+      setText(characterNote, !roles.length ? m("export.vmd_no_character")
+        : useCharacter ? m("export.vmd_character_note", { name: roles[0].asset.name })
+          : m("export.vmd_generic_note"));
+    }
+    const hint = profile === "vmd" ? (vmdTarget.value === "target" ? "vmd_target" : "vmd_generic") : profile;
+    setText($("motionExportHint"), profile ? m(`export.${hint}_hint`) : "");
+    setText($("exportPeopleLabel"), m(meta ? "export.select_person" : "export.select_people"));
     const busy = !!pending;
     format.disabled = peopleField.disabled = template.disabled = vmdTarget.disabled = chooseCharacter.disabled = busy;
-    clearTemplate.disabled = busy;
-    confirm.disabled = !result || !profile || busy || (entries.length > 0 && !selected().length)
-      || (useTemplate && !validTemplate());
+    confirm.disabled = !result || !profile || busy || (entries.length > 0 && !selected().length) || (meta && !validTemplate());
     setText(confirm, m(busy ? "export.preparing" : "common.export"));
   }
   function setPeople(scene) {
@@ -123,6 +126,10 @@ export function initMotionExport(getBodyVariant, viewer) {
   menu.onclick = () => button.click();
   peopleField.addEventListener("change", sync);
   vmdTarget.addEventListener("change", sync);
+  useCharacterBox?.addEventListener("change", () => {
+    vmdTarget.value = useCharacterBox.checked ? "target" : "generic";
+    sync();
+  });
   chooseCharacter.onclick = () => {
     dialog.close("character");
     viewer.openCharacter();
@@ -132,19 +139,13 @@ export function initMotionExport(getBodyVariant, viewer) {
     vmdTarget.value = targets().length ? "target" : "generic";
     sync();
   });
-  format.addEventListener("change", () => {
-    template.value = "";
-    showError();
-    sync();
-  });
+  format.addEventListener("change", () => { showError(); sync(); });
   template.addEventListener("change", () => {
     const file = template.files[0];
-    const kind = format.value;
     showError(!file || validTemplate() ? "" : file.size > TEMPLATE_MAX_MB * 1024 * 1024
-      ? m(`server.${kind}_template_size`, { max: TEMPLATE_MAX_MB }) : m(`server.${kind}_template_required`));
+      ? m("server.metahuman_template_size", { max: TEMPLATE_MAX_MB }) : m("server.metahuman_template_required"));
     sync();
   });
-  clearTemplate.onclick = () => { template.value = ""; showError(); sync(); };
   dialog.addEventListener("close", () => {
     if (dialog.open) return;
     pending?.abort();
@@ -162,20 +163,16 @@ export function initMotionExport(getBodyVariant, viewer) {
     preferred = profile;
     localStorage.setItem(FORMAT_STORAGE, profile);
     const targetVmd = profile === "vmd" && vmdTarget.value === "target";
-    if (profile === "vrma" || (profile === "vmd" && !targetVmd)) {
+    if (profile === "vmd" && !targetVmd) {
       dialog.close("export");
-      download(api.motionUrl(id, profile, people));
+      download(api.vmdUrl(id, people));
       return;
     }
-    if (!usesTemplate(profile) && !targetVmd) {
-      const advancedSkeleton = profile === "maya_adv";
-      if (!advancedSkeleton) {
-        localStorage.setItem(SKIN_STORAGE, skin.checked ? "on" : "off");
-        localStorage.setItem(POSE_STORAGE, pose.value);
-      }
+    if (profile !== "metahuman" && !targetVmd) {
+      localStorage.setItem(SKIN_STORAGE, skin.checked ? "on" : "off");
+      localStorage.setItem(POSE_STORAGE, pose.value);
       dialog.close("export");
-      download(api.fbxUrl(id, !advancedSkeleton && skin.checked, getBodyVariant(), people,
-        advancedSkeleton ? "t" : pose.value, profile));
+      download(api.fbxUrl(id, skin.checked, getBodyVariant(), people, pose.value, profile));
       return;
     }
     const operation = pending = new AbortController();
@@ -184,7 +181,7 @@ export function initMotionExport(getBodyVariant, viewer) {
     try {
       const { blob, filename } = targetVmd
         ? await makePmxVmd(viewer, people, result.filename, operation.signal)
-        : await api.exportTemplateFbx(id, people, profile, template.files[0], operation.signal);
+        : await api.exportMetaHuman(id, people, template.files[0], operation.signal);
       if (pending !== operation || result?.id !== id || !dialog.open) return;
       downloadBlob(blob, filename);
     } catch (cause) {
@@ -202,8 +199,7 @@ export function initMotionExport(getBodyVariant, viewer) {
   return {
     setResult(id, job) {
       result = { id, filename: job.filename };
-      const availableByFormat = { vmd: !!job.has_vmd, vrma: !!job.has_vrma };
-      for (const option of formats) option.disabled = !(availableByFormat[option.value] ?? job.has_fbx);
+      for (const option of formats) option.disabled = !(option.value === "vmd" ? job.has_vmd : job.has_fbx);
       const available = formats.filter((option) => !option.disabled);
       format.value = (available.find((option) => option.value === preferred) ?? available[0])?.value ?? "";
       setPeople(job.scene);
@@ -229,6 +225,8 @@ async function makePmxVmd(viewer, people, filename, signal) {
   const [{ createPmxRetarget }, { encodePmxVmd, packPmxVmdZip }] = await Promise.all([
     import("./pmx-retarget.js"), import("./pmx-vmd.js"),
   ]);
+  const includeCloth = $("exportCloth")?.checked ?? false;
+  const clothModule = includeCloth ? await import("./cloth-dynamics.js") : null;
   const stem = (filename || "FlowHMR").replace(/\.[^.]+$/, "").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 100);
   const files = [];
   for (const actor of actors) {
@@ -237,10 +235,17 @@ async function makePmxVmd(viewer, people, filename, signal) {
     const clone = asset.clone();
     try {
       const solver = createPmxRetarget(clone, asset.rest, actor.motion, { poseOffsets: actor.poseOffsets });
+      let cloth = null;
+      if (clothModule) {
+        cloth = bakeClothForExport({
+          createClothDynamics: clothModule.createClothDynamics,
+          solver, clone, motion: actor.motion, signal,
+        });
+      }
       const bytes = await encodePmxVmd({
         solver, rest: asset.rest, modelName: asset.name,
         frameCount: actor.motion.frames, fps: actor.fps, startFrame: actor.start, sceneEndFrame: actor.sceneEnd,
-        placement: { yaw: actor.yaw, offset: actor.offset }, signal,
+        placement: { yaw: actor.yaw, offset: actor.offset }, signal, cloth,
       });
       const tag = actor.person == null ? "" : `_person${actor.person}`;
       files.push({ name: `${stem}${tag}_pmx.vmd`, bytes });
@@ -251,4 +256,43 @@ async function makePmxVmd(viewer, people, filename, signal) {
   return files.length === 1
     ? { blob: new Blob([files[0].bytes], { type: "application/octet-stream" }), filename: files[0].name }
     : { blob: packPmxVmdZip(files), filename: `${stem}_pmx_vmd.zip` };
+}
+
+/**
+ * Solve cloth over the whole clip on the export clone and return the baked
+ * quaternion tracks. Runs only when the checkbox is on; a failure to converge
+ * drops the cloth rather than producing a broken animation.
+ */
+function bakeClothForExport({ createClothDynamics, solver, clone, motion, signal }) {
+  const dynamics = createClothDynamics({ mesh: clone, rig: solver, options: {} });
+  if (!dynamics.info.bones) return null;
+  const bones = clone.skeleton?.bones ?? [];
+  const names = dynamics.info.chains.flatMap((chain) => chain.names);
+  const indices = names.map((name) => bones.findIndex((bone) => bone.name === name));
+  const usable = [];
+  const slots = [];
+  indices.forEach((index, slot) => {
+    if (index >= 0) { usable.push(bones[index]); slots.push(slot); }
+  });
+  if (!usable.length) return null;
+
+  const total = motion.frames;
+  const stride = names.length * 4;
+  const data = new Float32Array(total * stride);
+  dynamics.reset();
+  for (let frame = 0; frame < total; frame += 1) {
+    if ((frame & 63) === 0) signal?.throwIfAborted?.();
+    solver.apply(frame);
+    const failure = dynamics.step(frame, 1 / 60);
+    if (failure) return null;
+    for (let i = 0; i < usable.length; i += 1) {
+      const q = usable[i].quaternion;
+      const at = frame * stride + slots[i] * 4;
+      data[at] = q.x;
+      data[at + 1] = q.y;
+      data[at + 2] = q.z;
+      data[at + 3] = q.w;
+    }
+  }
+  return { names, data, from: 0, length: total, stride };
 }

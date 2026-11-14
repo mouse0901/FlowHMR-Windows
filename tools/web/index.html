@@ -14,6 +14,13 @@
 </script>
 </head>
 <body>
+<div class="boot-splash" id="bootSplash" role="status" aria-live="polite">
+  <div class="boot-card">
+    <div class="boot-name">FlowHMR</div>
+    <div class="boot-bar"><i></i></div>
+    <p class="boot-text" id="bootText">正在启动…</p>
+  </div>
+</div>
 <header class="topbar">
   <div class="topbar-inner">
     <div class="brand">
@@ -24,13 +31,11 @@
           <button type="button" id="menuImport" data-i18n="menu.import">导入视频…</button>
           <button type="button" id="menuFbx" disabled data-i18n="menu.export_motion">导出动作…</button>
           <button type="button" id="menuNpz" disabled data-i18n="menu.export_npz">导出 NPZ…</button>
-          <button type="button" id="menuUpdates" class="hidden" data-i18n="update.check">检查更新…</button>
         </div>
       </details>
       <span class="workspace-tab" data-i18n="menu.layout">布局</span>
     </div>
     <div class="topbar-actions">
-      <button type="button" class="model-info model-button hidden" id="btnMcp" aria-haspopup="dialog" aria-controls="mcpDialog" data-i18n-title="mcp.title">MCP</button>
       <select id="languageSelect" class="input language-select" aria-label="界面语言" data-i18n-label="menu.language" data-i18n-title="menu.language">
         <option value="zh-CN" lang="zh-CN">简体中文</option>
         <option value="zh-TW" lang="zh-TW">繁體中文</option>
@@ -40,7 +45,6 @@
         <option value="ru" lang="ru">Русский</option>
         <option value="fr" lang="fr">Français</option>
       </select>
-      <button type="button" class="model-info model-button update-button hidden" id="btnUpdate" aria-haspopup="dialog" aria-controls="updateDialog" data-i18n="update.check">检查更新…</button>
       <div class="theme-options" id="themeOptions" role="group" aria-label="Color theme" data-i18n-label="theme.label">
         <button type="button" class="theme-option" data-theme-choice="light" title="Light mode" aria-label="Light mode" aria-pressed="false" data-i18n-title="theme.light" data-i18n-label="theme.light">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>
@@ -68,10 +72,25 @@
   <!-- ============================================================ left: input & controls -->
   <aside class="sidebar source-editor" aria-label="视频编辑器" data-i18n-label="source.title">
     <!-- Video: upload + preview with person boxes -->
-    <section class="card source-video-card">
+    <section class="card">
       <div class="card-head">
         <h3 class="card-title editor-title"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="m7 6 3 2-3 2z"/></svg><span data-i18n="source.title">视频编辑器</span></h3>
         <span class="preview-title" id="previewTitle"></span>
+      </div>
+      <div class="preview-options hidden" id="previewOptions">
+        <label class="preview-option">
+          <span data-i18n="source.ratio">比例</span>
+          <select class="input" id="previewRatio" aria-label="预览比例" data-i18n-label="source.ratio">
+            <option value="auto" data-i18n="source.ratio_auto">自适应</option>
+            <option value="9:16">9:16</option>
+            <option value="16:9">16:9</option>
+            <option value="1:1">1:1</option>
+            <option value="4:3">4:3</option>
+          </select>
+        </label>
+        <label class="preview-option check" title="画面铺满预览框，超出的部分被裁掉" data-i18n-title="source.fill_hint">
+          <input type="checkbox" id="previewFill"> <span data-i18n="source.fill">填满裁切</span>
+        </label>
       </div>
       <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="选择视频" data-i18n-label="source.choose">
         <input type="file" id="fileInput" accept="video/*" hidden>
@@ -240,9 +259,19 @@
         <div class="setting-row">
           <div>
             <div class="setting-label" data-i18n="sam.auto">自动选择 SAM 批次</div>
-            <div class="setting-help" id="samChunkHelp" data-i18n="sam.memory_hint">运行时按显存和系统内存余量调整</div>
+            <div class="setting-help" id="samChunkHelp" data-i18n="sam.memory_hint">按任务开始时的可用显存估计</div>
           </div>
           <button type="button" class="toggle" id="optSamAuto" role="switch" aria-label="自动选择 SAM 批次" aria-checked="true" data-i18n-label="sam.auto"><span class="toggle-knob"></span></button>
+        </div>
+        <div class="setting-row hidden" id="samHybridRow">
+          <div>
+            <div class="setting-label" data-i18n="sam.backend">SAM 运行模式</div>
+            <div class="setting-help" id="samHybridHint" data-i18n="sam.hybrid_hint">混合模式用 CPU 提取图像特征，核显继续解码。可降低 GPU 内存占用，速度可能更慢。</div>
+          </div>
+          <select class="input setting-select" id="optSamBackend" data-i18n-label="sam.backend" aria-describedby="samHybridHint">
+            <option value="gpu" data-i18n="sam.backend_gpu">GPU</option>
+            <option value="hybrid" data-i18n="sam.backend_hybrid">CPU + GPU（省显存）</option>
+          </select>
         </div>
         <div class="field-grid hidden" id="samChunkRow">
           <label class="field">
@@ -255,29 +284,6 @@
         <p class="setting-help settings-note" data-i18n="sam.setting_note">
           手动批次可按显存调整。处理起止帧在底部时间轴设置。
         </p>
-        <hr class="property-divider">
-        <div class="setting-row hidden" id="samHybridRow">
-          <div>
-            <div class="setting-label" data-i18n="sam.backend">SAM 运行模式</div>
-            <div class="setting-help" id="samHybridHint" data-i18n="sam.hybrid_hint">混合模式用 CPU 提取图像特征，核显继续解码。可降低 GPU 内存占用，速度可能更慢。</div>
-          </div>
-          <select class="input setting-select" id="optSamBackend" data-i18n-label="sam.backend" aria-describedby="samHybridHint">
-            <option value="gpu" data-i18n="sam.backend_gpu">GPU</option>
-            <option value="hybrid" data-i18n="sam.backend_hybrid">CPU + GPU（省显存）</option>
-          </select>
-        </div>
-        <div class="setting-row" id="samHandStrideRow">
-          <div>
-            <div class="setting-label" data-i18n="sam.hand_stride">SAM 手部采样</div>
-            <div class="setting-help" id="samHandStrideHint" data-i18n="sam.hand_stride_hint">建议只在开启手指精修时使用：间隔越大处理速度越快，略微降低质量</div>
-          </div>
-          <select class="input setting-select" id="optSamHandStride"
-                  data-i18n-label="sam.hand_stride" aria-describedby="samHandStrideHint">
-            <option value="1" data-i18n="sam.hand_stride_off">逐帧（关闭）</option>
-            <option value="2" data-i18n="sam.hand_stride_two">每 2 帧</option>
-            <option value="4" data-i18n="sam.hand_stride_four">每 4 帧</option>
-          </select>
-        </div>
       </div>
     </section>
 
@@ -304,7 +310,6 @@
       </div>
       <ol class="stages" id="stageList"></ol>
       <p class="job-msg" id="jobMsg"></p>
-      <p class="setting-help job-warning hidden" id="jobLongMotion"></p>
       <p class="setting-help hidden" id="jobCamera"></p>
       <p class="setting-help hidden" id="jobSamBatch"></p>
       <p class="setting-help hidden" id="jobHamer"></p>
@@ -324,7 +329,16 @@
     <div class="card-head viewport-header">
       <div class="viewport-menus">
         <span class="editor-title"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m8 1.5 5.5 3v7L8 14.5l-5.5-3v-7zM8 8l5.5-3.5M8 8 2.5 4.5M8 8v6.5"/></svg><span class="sr-only" data-i18n="view.title">3D 视图</span></span>
-        <span class="mode-label" id="viewportMode" data-i18n="view.solid">实体预览</span>
+        <details class="editor-menu display-menu" id="displayMenu">
+          <summary title="画面显示方式：着色、线框或只看骨架" data-i18n-title="view.display_hint"><span data-i18n="view.display">显示</span> <b id="displayValue">原材质</b></summary>
+          <div class="editor-menu-popup display-popup">
+            <button type="button" data-display="original"><span data-i18n="view.look_original">原材质</span> <kbd>1</kbd></button>
+            <button type="button" data-display="white"><span data-i18n="view.look_white">白模</span> <kbd>2</kbd></button>
+            <button type="button" data-display="normal"><span data-i18n="view.look_normal">法线</span> <kbd>3</kbd></button>
+            <button type="button" data-display="wire"><span data-i18n="view.mode_wire">线框</span> <kbd>4</kbd></button>
+            <button type="button" data-display="skeleton"><span data-i18n="view.mode_skeleton">仅骨架</span> <kbd>5</kbd></button>
+          </div>
+        </details>
         <details class="editor-menu">
           <summary data-i18n="view.menu">视图</summary>
           <div class="editor-menu-popup">
@@ -408,7 +422,7 @@
       <div class="downloads">
         <button type="button" class="editor-icon" id="toggleGrid" aria-pressed="true" aria-label="显示地面网格" title="显示地面网格" data-i18n-label="view.grid" data-i18n-title="view.grid"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2h12v12H2zM6 2v12m4-12v12M2 6h12M2 10h12"/></svg></button>
         <button type="button" class="editor-icon" id="toggleWire" aria-pressed="false" aria-label="线框显示" title="线框显示" data-i18n-label="view.wire" data-i18n-title="view.wire"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><ellipse cx="8" cy="8" rx="2.5" ry="6"/><path d="M2 8h12"/></svg></button>
-        <button type="button" class="btn-secondary small hidden" id="dlFbx" disabled data-i18n="export.motion">导出动作</button>
+        <button type="button" class="btn-secondary small hidden" id="dlFbx" disabled data-i18n-title="export.motion">FBX / VMD</button>
         <a class="btn-primary small hidden" id="dlNpz" href="#" download title="SMPL-H motion: poses (T,52,3), trans (T,3), betas" data-i18n-title="export.npz_hint">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           NPZ
@@ -417,11 +431,34 @@
     </div>
     <div class="viewer-wrap">
       <div id="viewer"></div>
+      <div class="viewer-loading hidden" id="viewerLoading" role="status" aria-live="polite">
+        <div class="vl-card">
+          <div class="vl-bar"><i id="viewerLoadingBar"></i></div>
+          <span class="vl-text" id="viewerLoadingText" data-i18n="view.loading_mesh">正在读取网格…</span>
+        </div>
+      </div>
       <div class="viewport-label"><strong id="viewportName" data-i18n="view.user_perspective">用户透视</strong><span id="viewportObject" data-i18n="view.scene">场景集合</span></div>
+      <div class="cloth-overlay hidden" id="clothOverlay" role="dialog" aria-modal="true" aria-live="polite">
+        <div class="cloth-card">
+          <h3 data-i18n="cloth.title">布料解算</h3>
+          <div class="cloth-bar"><i id="clothBar"></i></div>
+          <p class="cloth-progress" id="clothProgress">0 / 0</p>
+          <p class="cloth-note" id="clothNote"></p>
+          <div class="cloth-actions">
+            <button type="button" class="btn-secondary small" id="clothStop" data-i18n="cloth.stop">停止并保留</button>
+            <button type="button" class="btn-secondary small" id="clothCancel" data-i18n="cloth.cancel">取消</button>
+          </div>
+          <details class="cloth-params">
+            <summary data-i18n="cloth.params">参数</summary>
+            <label><span data-i18n="cloth.elasticity">弹性</span><input type="range" id="clothElasticity" min="0" max="1" step="0.01" value="0.2"></label>
+            <label><span data-i18n="cloth.damping">阻尼</span><input type="range" id="clothDamping" min="0.5" max="0.99" step="0.01" value="0.9"></label>
+            <label><span data-i18n="cloth.gravity">重力</span><input type="range" id="clothGravity" min="0" max="1.5" step="0.05" value="0.55"></label>
+            <label><input type="checkbox" id="clothCollide" checked><span data-i18n="cloth.collide">碰撞</span></label>
+          </details>
+        </div>
+      </div>
       <div class="viewport-toolbar" aria-label="视窗工具" data-i18n-label="view.tools">
-        <button type="button" class="editor-icon" data-mouse-mode="rotate" aria-pressed="false" aria-label="旋转视图" title="左键旋转，中键平移" data-i18n-label="view.rotate" data-i18n-title="view.rotate_hint"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 6.5A6.4 6.4 0 1 0 16 12M15.5 2.5v4h-4"/></svg></button>
-        <button type="button" class="editor-icon" data-mouse-mode="pan" aria-pressed="true" aria-label="平移视图" title="左键平移，中键和右键旋转" data-i18n-label="view.pan" data-i18n-title="view.pan_hint"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2v16M2 10h16M7.5 4.5 10 2l2.5 2.5m-5 11 2.5 2.5 2.5-2.5M4.5 7.5 2 10l2.5 2.5m11-5L18 10l-2.5 2.5"/></svg></button>
-        <button type="button" class="editor-icon" id="btnReset" aria-label="居中显示" title="居中显示（Home）" data-i18n-label="view.center" data-i18n-title="view.center_hint"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 4H4v4m8-4h4v4M4 12v4h4m8-4v4h-4"/><circle cx="10" cy="10" r="2"/></svg></button>
+        <button type="button" class="vt-plain" id="btnReset" title="聚焦当前画面（F / Home）" data-i18n-title="view.center_hint"><span data-i18n="view.center_short">居中</span></button>
       </div>
       <div class="view-gizmo" id="viewGizmo" aria-label="坐标轴视角" data-i18n-label="view.axes">
         <svg viewBox="0 0 92 92" aria-hidden="true"><line class="gizmo-x" x1="46" y1="46"/><line class="gizmo-y" x1="46" y1="46"/><line class="gizmo-z" x1="46" y1="46"/></svg>
@@ -433,13 +470,31 @@
         <button type="button" class="gizmo-z opposite" data-view="bottom" title="底视" aria-label="底视" data-i18n-title="view.bottom" data-i18n-label="view.bottom"></button>
       </div>
       <div class="viewer-empty" id="viewerEmpty" data-i18n="view.empty">导入视频后，点击「生成 3D 动作」</div>
+      <div class="viewer-stats hidden" id="viewerStats" aria-hidden="true" data-i18n-title="view.fps_hud"></div>
       <div class="viewer-tools hidden" id="viewerTools">
-        <label title="在模型表面叠加 SMPL-H 骨架和关节" id="skeletonOverlayLabel" data-i18n-title="view.skeleton_hint"><input type="checkbox" id="optSkeleton" checked disabled> <span data-i18n="view.skeleton">骨架</span></label>
-        <label title="用 Blender 风格的八面体显示骨骼" data-i18n-title="view.cones_hint"><input type="checkbox" id="optBoneCones" disabled> <span data-i18n="view.cones">锥体骨骼</span></label>
-        <label title="勾选显示人物表面，取消勾选只显示骨架" data-i18n-title="view.skin_hint"><input type="checkbox" id="optSkin" checked disabled> <span data-i18n="view.skin">蒙皮</span></label>
-        <label><input type="checkbox" id="optFollow" checked> <span data-i18n="view.follow">跟随</span></label>
-        <label><input type="checkbox" id="optSync" checked> <span data-i18n="view.sync">同步视频</span></label>
-        <label><input type="checkbox" id="optAudio" checked> <span data-i18n="view.audio">原声</span></label>
+        <select class="select vt-select hidden" id="optLook" aria-label="外观" data-i18n-label="view.look">
+          <option value="white" data-i18n="view.look_white">白模</option>
+          <option value="original" data-i18n="view.look_original">原材质</option>
+          <option value="normal" data-i18n="view.look_normal">法线</option>
+        </select>
+        <label class="vt-pill" title="在模型表面叠加骨骼线（S）" data-i18n-title="view.skeleton_hint" id="skeletonOverlayLabel"><input type="checkbox" id="optSkeleton" checked disabled> <span data-i18n="view.skeleton">骨骼</span></label>
+        <label class="vt-pill" title="卡通着色：边缘光、冷调阴影、色阶分离（C）" data-i18n-title="view.cel_hint"><input type="checkbox" id="optCel" checked> <span data-i18n="view.cel">三渲二</span></label>
+        <label class="vt-pill" title="给 MMD 角色加卡通描边（O）" data-i18n-title="view.outline_hint"><input type="checkbox" id="optOutline" checked> <span data-i18n="view.outline">描边</span></label>
+        <label class="vt-pill hidden" title="裙摆、头发等部位受重力和惯性驱动（D）" data-i18n-title="view.cloth_hint"><input type="checkbox" id="optCloth"> <span data-i18n="view.cloth">布料</span></label>
+        <button type="button" class="vt-pill hidden" id="clothSolveButton" title="逐帧解算布料并缓存（B）" data-i18n-title="cloth.solve_hint" data-i18n="cloth.solve">解算</button>
+        <details class="vt-group" id="vtMoreGroup">
+          <summary title="更多显示选项" data-i18n-title="view.more_hint">⚙</summary>
+          <div class="vt-popup">
+            <label title="用 Blender 风格的八面体显示骨骼" data-i18n-title="view.cones_hint"><input type="checkbox" id="optBoneCones" disabled> <span data-i18n="view.cones">锥体骨骼</span></label>
+            <label title="勾选显示人物表面，取消勾选只显示骨架" data-i18n-title="view.skin_hint"><input type="checkbox" id="optSkin" checked disabled> <span data-i18n="view.skin">蒙皮</span></label>
+            <label class="vt-range" title="关节显示大小" data-i18n-title="view.joint_size_hint"><span data-i18n="view.joints">关节</span><input type="range" id="optJointSize" min="1" max="10" step="1" value="4" disabled></label>
+            <label class="vt-range" title="锥体骨骼的粗细" data-i18n-title="view.bone_width_hint"><span data-i18n="view.bones">骨骼</span><input type="range" id="optBoneWidth" min="0.4" max="2" step="0.1" value="1" disabled></label>
+            <label><input type="checkbox" id="optFollow" checked> <span data-i18n="view.follow">跟随</span></label>
+            <label><input type="checkbox" id="optSync" checked> <span data-i18n="view.sync">同步视频</span></label>
+            <label><input type="checkbox" id="optAudio" checked> <span data-i18n="view.audio">原声</span></label>
+            <label title="显示绘制帧率与动作帧率，用来定位卡顿" data-i18n-title="view.fps_hint"><input type="checkbox" id="optFps"> <span data-i18n="view.fps">帧率</span></label>
+          </div>
+        </details>
       </div>
     </div>
   </section>
@@ -464,7 +519,15 @@
           <option value="2">2×</option>
         </select>
       </div>
-      <span class="timeline-rate" id="timelineRange">30 FPS</span>
+      <select id="timelineFps" class="select timeline-rate" aria-label="时间轴帧率" disabled data-i18n-label="timeline.fps">
+        <option value="24">24 FPS</option>
+        <option value="25">25 FPS</option>
+        <option value="30" selected>30 FPS</option>
+        <option value="48">48 FPS</option>
+        <option value="50">50 FPS</option>
+        <option value="60">60 FPS</option>
+        <option value="120">120 FPS</option>
+      </select>
     </div>
     <div class="trim-lane" id="trimLane">
       <span class="trim-label" data-i18n="timeline.range">处理区间</span>
@@ -476,6 +539,13 @@
       <label><span data-i18n="timeline.start">起</span> <input id="trimStartValue" type="number" min="1" step="1" value="1" aria-label="输入处理起始帧" disabled data-i18n-label="timeline.start_input"></label>
       <label><span data-i18n="timeline.end">止</span> <input id="trimEndValue" type="number" min="1" step="1" placeholder="自动" aria-label="输入处理结束帧，留空自动" disabled data-i18n-placeholder="common.auto" data-i18n-label="timeline.end_input"></label>
       <button type="button" class="btn-secondary small" id="trimFull" title="处理完整人物轨迹" disabled data-i18n-title="timeline.full_hint" data-i18n="timeline.full">全段</button>
+    </div>
+    <div class="cloth-lane hidden" id="clothLane">
+      <span class="trim-label" data-i18n="timeline.cloth">布料动力学</span>
+      <div class="cloth-lane-body">
+        <canvas id="clothLaneCanvas" height="26"></canvas>
+        <span class="cloth-lane-hint" id="clothLaneHint" data-i18n="timeline.cloth_idle">未解算</span>
+      </div>
     </div>
     <div class="timeline-track" id="timelineTrack">
       <div class="timeline-ticks num" id="timelineTicks" aria-hidden="true"></div>
@@ -489,7 +559,7 @@
   <div class="editor-splitter splitter-timeline" data-split="timeline" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整时间轴高度" title="拖动调整时间轴高度，双击恢复" data-i18n-label="layout.timeline" data-i18n-title="layout.timeline_hint"></div>
 </main>
 
-<footer class="workspace-status"><span id="viewControlHint" data-i18n="view.pan_status">左键平移 · 中键/右键旋转 · 滚轮缩放 · 空格播放</span><span id="mcpActivityStatus" role="status"></span><span id="workspaceState">FlowHMR</span></footer>
+<footer class="workspace-status"><span id="viewControlHint" data-i18n="view.nav_hint">左键拖动平移 · 中键或右键拖动旋转 · 滚轮推拉 · 空格播放</span><span id="workspaceState">FlowHMR</span></footer>
 
 <dialog id="modelDialog" class="model-dialog" aria-labelledby="modelTitle">
   <header class="model-dialog-head">
@@ -532,76 +602,6 @@
   </footer>
 </dialog>
 
-<dialog id="updateDialog" class="model-dialog update-dialog" aria-labelledby="updateTitle">
-  <header class="model-dialog-head">
-    <h2 id="updateTitle" data-i18n="update.title">程序更新</h2>
-    <form method="dialog"><button type="submit" class="editor-icon" aria-label="关闭" title="关闭" data-i18n-label="common.close" data-i18n-title="common.close">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg>
-    </button></form>
-  </header>
-  <div class="update-details">
-    <p id="updateVersion"></p>
-    <p id="updateStatus" role="status"></p>
-    <section class="update-notes hidden" id="updateNotes" aria-labelledby="updateNotesTitle">
-      <h3 id="updateNotesTitle" data-i18n="update.notes">更新内容</h3>
-      <p id="updateNotesText" tabindex="0"></p>
-    </section>
-    <progress id="updateProgress" class="hidden" aria-label="更新进度" data-i18n-label="update.progress"></progress>
-    <div class="update-history hidden" id="updateHistory">
-      <label for="updateVersionSelect" data-i18n="update.history">历史版本</label>
-      <div class="update-version-actions">
-        <select class="input" id="updateVersionSelect"></select>
-        <button type="button" class="btn-secondary small hidden" id="updateApplyVersion" data-i18n="update.use_version">使用此版本</button>
-        <a class="hidden" id="updateOlderZip" target="_blank" rel="noopener noreferrer" data-i18n="update.older_zip">下载 ZIP</a>
-      </div>
-      <p class="hidden" id="updateLegacyNote" data-i18n="update.legacy_hint">此版本请下载后解压运行。</p>
-    </div>
-  </div>
-  <footer class="model-dialog-foot">
-    <a href="https://github.com/xiaoerofficial021-collab/FlowHMR-Windows/releases" target="_blank" rel="noopener noreferrer" data-i18n="update.releases">发布页</a>
-    <div class="model-actions">
-      <button type="button" class="btn-secondary small" id="updateCheck" data-i18n="common.refresh">刷新</button>
-      <button type="button" class="btn-secondary small" id="updateManual" data-i18n="update.manual" data-i18n-title="update.manual_hint">手动更新…</button>
-      <button type="button" class="btn-secondary small hidden" id="updateStop" data-i18n="download.stop">停止下载</button>
-      <button type="button" class="btn-primary small hidden" id="updateDownload" data-i18n="download.download">下载</button>
-    </div>
-  </footer>
-</dialog>
-
-<dialog id="mcpDialog" class="model-dialog" aria-labelledby="mcpTitle">
-  <header class="model-dialog-head">
-    <h3 id="mcpTitle" data-i18n="mcp.title">MCP 服务设置</h3>
-    <form method="dialog"><button type="submit" class="editor-icon" aria-label="关闭" title="关闭" data-i18n-label="common.close" data-i18n-title="common.close">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg>
-    </button></form>
-  </header>
-  <p class="model-hint" data-i18n="mcp.hint">供本机 Agent 导入视频与角色、调整参数和骨骼偏移、查询任务和导出动作。</p>
-  <div class="mcp-fields">
-    <label class="mcp-reveal"><input type="checkbox" id="mcpAutoStart"><span data-i18n="mcp.auto_start">自动开启 MCP</span></label>
-    <p class="setting-help" data-i18n="mcp.auto_start_hint">软件启动后自动开启 MCP 服务。</p>
-    <label><span data-i18n="mcp.port">端口</span><input class="input" id="mcpPort" type="number" min="1024" max="65535" step="1" value="60551"></label>
-    <label><span data-i18n="mcp.url">连接地址</span><input class="input" id="mcpUrl" readonly></label>
-    <label class="mcp-reveal"><input type="checkbox" id="mcpAuth"><span data-i18n="mcp.auth">启用访问令牌</span></label>
-    <label id="mcpTokenRow" class="hidden"><span data-i18n="mcp.token">访问令牌</span><input class="input" id="mcpToken" type="password" readonly autocomplete="off"></label>
-    <label id="mcpRevealRow" class="mcp-reveal hidden"><input type="checkbox" id="mcpReveal"><span data-i18n="mcp.reveal">显示令牌</span></label>
-    <div class="model-actions">
-      <button type="button" class="btn-secondary small" id="mcpCopy" data-i18n="mcp.copy">复制连接配置</button>
-      <button type="button" class="btn-secondary small" id="mcpReset" data-i18n="mcp.reset">重置令牌</button>
-    </div>
-  </div>
-  <section class="mcp-fields">
-    <h4 data-i18n="mcp.activity">最近 MCP 操作与导出</h4>
-    <div id="mcpActivityList" class="mcp-activity-list" aria-live="polite"></div>
-  </section>
-  <footer class="model-dialog-foot">
-    <span id="mcpStatus" role="status" aria-live="polite"></span>
-    <div class="model-actions">
-      <button type="button" class="btn-secondary small" id="mcpTest" data-i18n="mcp.test">验证连接</button>
-      <button type="button" class="btn-primary small" id="mcpToggle" data-i18n="mcp.start">启动服务</button>
-    </div>
-  </footer>
-</dialog>
-
 <dialog id="runtimeDialog" class="model-dialog runtime-dialog" aria-labelledby="runtimeTitle">
   <header class="model-dialog-head">
     <h2 id="runtimeTitle" data-i18n="runtime.title">运行环境</h2>
@@ -639,14 +639,22 @@
         <option value="flowhmr">FlowHMR FBX</option>
         <option value="mixamo">Mixamo FBX</option>
         <option value="metahuman">MetaHuman FBX</option>
-        <option value="maya_adv">Maya AdvancedSkeleton FBX</option>
         <option value="vmd">MMD VMD</option>
-        <option value="vrma">VRM Animation (.vrma)</option>
       </select>
     </label>
     <p class="setting-help export-format-hint" id="motionExportHint"></p>
     <div id="vmdOptions" class="character-file hidden">
-      <select class="input" id="vmdTarget" aria-label="PMX 模型" data-i18n-label="character.file">
+      <label class="setting-row">
+        <input type="checkbox" id="vmdUseCharacter" checked>
+        <span data-i18n="export.vmd_use_character">使用当前角色的骨架</span>
+      </label>
+      <p class="setting-help" id="vmdCharacterNote"></p>
+      <label class="setting-row hidden" id="exportClothRow">
+        <input type="checkbox" id="exportCloth" checked>
+        <span data-i18n="export.include_cloth">含布料动画</span>
+      </label>
+      <p class="setting-help hidden" id="exportClothHint" data-i18n="export.include_cloth_hint">导出时逐帧烘焙布料解算结果；未解算过也会现场计算。</p>
+      <select class="input hidden" id="vmdTarget" aria-label="PMX 模型" data-i18n-label="character.file">
         <option value="target" id="vmdTargetCharacter"></option>
         <option value="generic" data-i18n="export.vmd_generic">通用骨架</option>
       </select>
@@ -669,14 +677,10 @@
       </label>
       <p class="setting-help" data-i18n="export.reference_hint">参考姿势是 FBX 第 −1 帧的关键帧。Blender 默认导入后在第 0 帧，需切到姿态位置查看。</p>
     </div>
-    <div class="field fbx-template hidden" id="fbxTemplateRow">
-      <label for="fbxTemplate" id="fbxTemplateLabel" data-i18n="export.metahuman_template">目标身体骨架（FBX）</label>
-      <div class="fbx-template-controls">
-        <input class="input" type="file" id="fbxTemplate" accept=".fbx">
-        <button type="button" class="btn-secondary small hidden" id="fbxTemplateClear" data-i18n="export.clear_template">清除模板</button>
-      </div>
-      <p class="setting-help hidden" id="fbxTemplateHint" data-i18n="export.mixamo_hint">选择目标角色的原版 Mixamo FBX。导出会保留模板自带的蒙皮。留空时使用通用 Mixamo 骨架。</p>
-    </div>
+    <label class="field fbx-template hidden" id="metaHumanTemplateRow">
+      <span data-i18n="export.metahuman_template">目标身体骨架（FBX）</span>
+      <input class="input" type="file" id="metaHumanTemplate" accept=".fbx">
+    </label>
     <p class="error hidden" id="motionExportError" role="alert"></p>
     <div class="fbx-export-actions">
       <button class="btn-secondary small" value="cancel" data-i18n="common.cancel">取消</button>
@@ -685,17 +689,40 @@
   </form>
 </dialog>
 
-<dialog id="previewCharacterDialog" class="fbx-export-dialog" aria-labelledby="previewCharacterTitle">
+<dialog id="previewCharacterDialog" class="fbx-export-dialog character-dialog" aria-labelledby="previewCharacterTitle">
   <form method="dialog">
     <h3 class="card-title" id="previewCharacterTitle" data-i18n="character.title">预览角色</h3>
-    <p class="setting-help" data-i18n="character.guide">选择 PMX、VRM 或带蒙皮的 Mixamo / MetaHuman FBX。外置贴图请放在 PMX 或 FBX 旁边。</p>
+    <p class="setting-help" data-i18n="character.guide">选择 PMX 或带蒙皮的 Mixamo / MetaHuman FBX。外置贴图放在模型旁边，程序会按引用加载。</p>
     <label class="character-selection hidden" id="characterActorRow">
       <span data-i18n="character.actor">人物</span>
       <select class="input" id="characterActor"></select>
     </label>
-    <div class="character-selection">
-      <label for="characterLibrary" data-i18n="character.library">角色库</label>
-      <select class="input" id="characterLibrary"></select>
+    <div class="character-picker">
+      <section class="character-browser">
+        <div class="character-browser-head">
+          <input class="input" id="characterSearch" type="search" autocomplete="off" data-i18n-placeholder="character.search" placeholder="搜索角色…">
+          <select class="input character-filter" id="characterFilter" aria-label="按格式筛选" data-i18n-label="character.filter">
+            <option value="all" data-i18n="character.filter_all">全部</option>
+            <option value="pmx">PMX</option>
+            <option value="fbx">FBX</option>
+          </select>
+        </div>
+        <div class="character-grid" id="characterGrid" role="listbox" aria-label="角色库" data-i18n-label="character.library"></div>
+        <p class="character-empty hidden" id="characterEmpty" data-i18n="character.empty">角色库还是空的，先导入一个模型。</p>
+      </section>
+      <section class="character-detail">
+        <div class="character-preview-frame" id="characterPreviewFrame">
+          <img id="characterPreviewImage" alt="" draggable="false">
+          <span class="character-preview-badge hidden" id="characterPreviewBadge"></span>
+        </div>
+        <strong class="character-detail-name" id="characterDetailName" data-i18n="character.preview_empty">未选择角色</strong>
+        <span class="character-detail-file" id="characterDetailFile"></span>
+        <span class="character-detail-info" id="characterDetailInfo"></span>
+        <p class="character-detail-warning hidden" id="characterDetailWarning" data-i18n="character.textures_missing_short">这个角色的贴图没有全部加载，缩略图会用白模渲染。</p>
+      </section>
+    </div>
+    <select class="hidden" id="characterLibrary"></select>
+    <div class="character-detail-actions">
       <button type="button" class="btn-secondary small character-remove" id="characterDelete" data-i18n="character.library_delete" disabled>删除</button>
     </div>
     <div class="character-delete-confirm hidden" id="characterDeleteConfirm" role="group" aria-labelledby="characterDeleteMessage">
@@ -708,8 +735,9 @@
     <p class="setting-help" data-i18n="character.library_hint">在桌面版应用新角色时，模型和引用的贴图会存入 models/characters。角色选择和骨骼调节会自动记住。</p>
     <div class="character-file">
       <input type="file" id="pmxFolder" webkitdirectory multiple hidden>
-      <input type="file" id="characterModelFile" accept=".pmx,.vrm,.fbx" hidden>
+      <input type="file" id="characterModelFile" accept=".pmx,.fbx" hidden>
       <button type="button" class="btn-secondary small" id="characterBrowse" data-i18n="character.pick">选择模型文件…</button>
+      <button type="button" class="btn-secondary small hidden" id="characterBatch" data-i18n="character.batch" title="选一个文件夹，把里面的 PMX / FBX 全部加入角色库">批量导入文件夹…</button>
       <button type="button" class="btn-secondary small hidden" id="pmxBrowse" data-i18n="character.folder">选择模型文件夹…</button>
       <select class="input hidden" id="pmxFile" data-i18n-label="character.file" aria-label="角色模型"></select>
     </div>
